@@ -176,6 +176,41 @@ export const api = {
   listVoices: (server: string) =>
     request<{ server: string; voices: string[] }>(`/voices?server=${encodeURIComponent(server)}`),
 
+  /** Synthesises a short listen of the selected voice. Returns a playable blob. */
+  previewVoice: async (
+    body: { voice_name: string; voice_rate: number; voice_volume: number; text: string },
+    signal?: AbortSignal,
+  ): Promise<{ blob: Blob; mimeType: string; duration: number | null }> => {
+    const response = await fetch("/api/v1/voices/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok) {
+      let message = `request failed with status ${response.status}`;
+      try {
+        const envelope = (await response.json()) as ApiEnvelope<unknown>;
+        if (envelope.message) message = envelope.message;
+      } catch {
+        // Non-JSON error body; keep the status text.
+      }
+      throw new ApiError(message, response.status);
+    }
+
+    const blob = await response.blob();
+    const durationHeader = response.headers.get("X-Audio-Duration");
+    const duration = durationHeader ? Number(durationHeader) : NaN;
+    return {
+      blob,
+      mimeType: response.headers.get("Content-Type") ?? blob.type,
+      duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+    };
+  },
+
+  musicFileUrl: (filename: string) => `/api/v1/musics/${encodeURIComponent(filename)}`,
+
   cacheStats: () =>
     request<{ videos: { files: number; bytes: number }; search: { entries: number; assets: number } }>(
       "/cache/stats",

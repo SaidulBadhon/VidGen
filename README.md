@@ -1,6 +1,6 @@
 <div align="center">
 
-# MoneyPrinterTurbo 💸
+# VidGen 🎬
 
 ### One-stop AI short-video generator
 
@@ -15,9 +15,10 @@ generates subtitles and background music, and renders a finished vertical video.
 
 ## What this is
 
-Version 2 is a full rewrite of MoneyPrinterTurbo on a TypeScript stack. One Bun process
-serves the JSON API, the generated media and the React UI, and runs the render worker in
-the background. MongoDB stores settings, task state and the stock-search cache.
+VidGen is a full rewrite of [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo)
+on a TypeScript stack. One Bun process serves the JSON API, the generated media and the
+React UI, and runs the render worker in the background. MongoDB stores settings, task
+state and the stock-search cache.
 
 The original Python implementation (FastAPI + Streamlit) is archived under
 [`python-version/`](python-version/README.md) as a working reference. Nothing in the new
@@ -62,7 +63,7 @@ Then open <http://127.0.0.1:8080>.
 bun install
 
 # MongoDB, if you do not already have one
-docker run -d --name mpt-mongo -p 27017:27017 mongo:7
+docker run -d --name vidgen-mongo -p 27017:27017 mongo:7
 
 bun run dev:server     # API + worker on :8080
 bun run dev:web        # Vite dev server on :5173, proxying to the API
@@ -194,3 +195,7 @@ web/src/       React UI, with the original nine locale files
 ## License
 
 [MIT](LICENSE)
+
+VidGen is a fork of [MoneyPrinterTurbo](https://github.com/harry0703/MoneyPrinterTurbo) by
+Harry, used under the MIT licence. Sponsor and referral links preserved in
+[`python-version/`](python-version/) belong to that upstream project, not to VidGen.

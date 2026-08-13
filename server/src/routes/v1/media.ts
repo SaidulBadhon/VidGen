@@ -9,16 +9,21 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { ALLOWED_MATERIAL_SUFFIXES } from "../../models/const.ts";
+import { voicePreviewRequestSchema } from "../../models/schema.ts";
 import { badRequest, notFound } from "../../http/errors.ts";
+import { serveFileWithRange } from "../../http/staticFiles.ts";
 import {
   BgmServiceError,
   BgmUploadError,
   listBgmFiles,
+  resolveBgmFile,
   saveBgmUpload,
+  sanitizeBgmFilename,
   SUPPORTED_BGM_EXTENSIONS,
 } from "../../services/bgm.ts";
 import { clearMaterialSearchCache, getMaterialSearchCacheStats } from "../../services/material/cache.ts";
-import { listVoicesForServer } from "../../services/voice/voices.ts";
+import { isNoVoice, listVoicesForServer } from "../../services/voice/voices.ts";
+import { synthesizeVoicePreview } from "../../services/voice/preview.ts";
 import * as sonilo from "../../services/music/sonilo.ts";
 import * as elevenlabsMusic from "../../services/music/elevenlabsMusic.ts";
 import * as uploadPost from "../../services/uploadPost.ts";
@@ -73,6 +78,23 @@ mediaRouter.post("/musics", async (c) => {
 mediaRouter.get("/musics/formats", (c) =>
   c.json(getResponse(200, { extensions: SUPPORTED_BGM_EXTENSIONS })),
 );
+
+/** Streams a library track so the settings UI can preview the current selection. */
+mediaRouter.get("/musics/:name", (c) => {
+  let safeName: string;
+  try {
+    safeName = sanitizeBgmFilename(c.req.param("name"));
+  } catch {
+    throw notFound("background music not found");
+  }
+
+  try {
+    return serveFileWithRange(c, resolveBgmFile(safeName));
+  } catch (error) {
+    if (error instanceof UnsafePathError) throw notFound("background music not found");
+    throw error;
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Local video materials
@@ -134,6 +156,36 @@ mediaRouter.get("/voices", async (c) => {
   const server = c.req.query("server") ?? "azure-tts-v1";
   const voices = await listVoicesForServer(server);
   return c.json(getResponse(200, { server, voices }));
+});
+
+mediaRouter.post("/voices/preview", async (c) => {
+  const body = voicePreviewRequestSchema.parse(await c.req.json());
+  if (isNoVoice(body.voice_name)) {
+    throw badRequest("voice preview is not available when narration is disabled");
+  }
+
+  const preview = await synthesizeVoicePreview({
+    text: body.text,
+    voiceName: body.voice_name,
+    voiceRate: body.voice_rate,
+    voiceVolume: body.voice_volume,
+    signal: c.req.raw.signal,
+  });
+
+  if (!preview) {
+    throw badRequest(
+      "The TTS service did not return preview audio. Check its settings and the application logs.",
+    );
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": preview.mimeType,
+    "Content-Length": String(preview.bytes.byteLength),
+    "Cache-Control": "no-store",
+  };
+  if (preview.duration != null) headers["X-Audio-Duration"] = preview.duration.toFixed(3);
+
+  return new Response(preview.bytes, { status: 200, headers });
 });
 
 // ---------------------------------------------------------------------------

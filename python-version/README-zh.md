@@ -1,20 +1,20 @@
 <div align="center">
 
-# MoneyPrinterTurbo 💸
+# VidGen 🎬
 
 ### 一站式 AI 短视频生成工具
 
 只需提供视频<b>主题</b>或<b>关键词</b>，即可自动生成视频脚本、匹配素材、生成字幕和背景音乐，并合成高清短视频。
 
-[![Version](https://img.shields.io/github/v/release/harry0703/MoneyPrinterTurbo?color=blue&label=version)](https://github.com/harry0703/MoneyPrinterTurbo/releases)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/harry0703/MoneyPrinterTurbo/releases/latest)
+[![Version](https://img.shields.io/github/v/release/SaidulBadhon/VidGen?color=blue&label=version)](https://github.com/SaidulBadhon/VidGen/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/SaidulBadhon/VidGen/releases/latest)
 [![Python](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Downloads](https://img.shields.io/github/downloads/harry0703/MoneyPrinterTurbo/total)](https://github.com/harry0703/MoneyPrinterTurbo/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/SaidulBadhon/VidGen/total)](https://github.com/SaidulBadhon/VidGen/releases/latest)
 
 <a href="https://trendshift.io/repositories/8731" target="_blank"><img src="https://trendshift.io/api/badge/repositories/8731" alt="harry0703%2FMoneyPrinterTurbo | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-<a href="https://www.star-history.com/harry0703/moneyprinterturbo"><img src="https://api.star-history.com/badge?repo=harry0703/MoneyPrinterTurbo" alt="Star History Rank" style="height: 55px;" height="55"/></a>
+<a href="https://www.star-history.com/saidulbadhon/vidgen"><img src="https://api.star-history.com/badge?repo=SaidulBadhon/VidGen" alt="Star History Rank" style="height: 55px;" height="55"/></a>
 
-简体中文 | [English](README-en.md) | [版本发布](https://github.com/harry0703/MoneyPrinterTurbo/releases) | [问题反馈](https://github.com/harry0703/MoneyPrinterTurbo/issues)
+简体中文 | [English](README-en.md) | [版本发布](https://github.com/SaidulBadhon/VidGen/releases) | [问题反馈](https://github.com/SaidulBadhon/VidGen/issues)
 
 </div>
 
@@ -140,7 +140,7 @@
 
 ## 作品展示 🎬
 
-以下示例均由 MoneyPrinterTurbo 实际生成。
+以下示例均由 VidGen 实际生成。
 
 ### 竖屏 9:16
 
@@ -205,21 +205,21 @@
 如果你的 AI Agent 支持读取 Skill 文档并操作本地终端，可以直接发送下面这段话。Agent 会自动完成安装、配置和视频生成；只有缺少必要的 API Key 时才会向你询问，完成后会返回生成的视频文件路径。目前支持 macOS 和 Windows。
 
 ```text
-使用这个 Skill：https://raw.githubusercontent.com/harry0703/MoneyPrinterTurbo/main/docs/skill/SKILL.md
+使用这个 Skill：https://raw.githubusercontent.com/SaidulBadhon/VidGen/main/docs/skill/SKILL.md
 帮我生成一个主题为“人工智能如何改变普通人的日常生活”的视频。
 ```
 
 ### 在 Google Colab 中运行
 
-免去本地环境配置，点击直接在 Google Colab 中快速体验 MoneyPrinterTurbo
+免去本地环境配置，点击直接在 Google Colab 中快速体验 VidGen
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/harry0703/MoneyPrinterTurbo/blob/main/docs/MoneyPrinterTurbo.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SaidulBadhon/VidGen/blob/main/docs/VidGen.ipynb)
 
 ### Windows 一键启动包
 
 下载一键启动包，解压直接使用（路径不要有 **中文**、**特殊字符**、**空格**）
 
-- GitHub Releases：https://github.com/harry0703/MoneyPrinterTurbo/releases/latest
+- GitHub Releases：https://github.com/SaidulBadhon/VidGen/releases/latest
 
 下载后，建议先**双击执行** `update.bat` 更新到**最新代码**，然后双击 `start.bat` 启动
 
@@ -235,7 +235,7 @@
 #### ① 克隆代码
 
 ```shell
-git clone https://github.com/harry0703/MoneyPrinterTurbo.git
+git clone https://github.com/SaidulBadhon/VidGen.git
 ```
 
 #### ② 配置项目（可选）
@@ -254,11 +254,11 @@ Windows 用户可以参考微软的文档：
 2. https://learn.microsoft.com/zh-cn/windows/wsl/tutorials/wsl-containers
 
 ```shell
-cd MoneyPrinterTurbo
+cd VidGen
 docker compose -f docker-compose.release.yml up
 ```
 
-> 默认推荐使用 `docker-compose.release.yml`，它会直接拉取 GitHub Container Registry 上的预构建镜像：`ghcr.io/harry0703/moneyprinterturbo:latest`。
+> 默认推荐使用 `docker-compose.release.yml`，它会直接拉取 GitHub Container Registry 上的预构建镜像：`ghcr.io/saidulbadhon/vidgen:latest`。
 > 如果你需要本地重新构建镜像，可以继续使用 `docker compose up`。
 > 首次启动前，请将 `config.example.toml` 复制为 `config.toml`，供容器挂载使用。
 
@@ -282,8 +282,8 @@ docker compose -f docker-compose.release.yml up
 推荐使用 [uv](https://docs.astral.sh/uv/) 管理 Python 环境和依赖。项目支持 Python 3.11 或更高版本，以下示例使用 Python 3.11。
 
 ```shell
-git clone https://github.com/harry0703/MoneyPrinterTurbo.git
-cd MoneyPrinterTurbo
+git clone https://github.com/SaidulBadhon/VidGen.git
+cd VidGen
 uv python install 3.11
 uv sync --frozen
 ```
@@ -304,7 +304,7 @@ pip install -r requirements.txt
 
 #### ② 启动 WebUI 🌐
 
-注意需要到 MoneyPrinterTurbo 项目 `根目录` 下执行以下命令
+注意需要到 VidGen 项目 `根目录` 下执行以下命令
 
 ###### Windows
 
@@ -314,7 +314,7 @@ pip install -r requirements.txt
 
 在 CMD 中也可以执行 `webui.bat`。
 `webui.bat` 会优先使用项目 `.venv` 或一键包内置 Python；如果没有找到项目 Python，但已安装 `uv`，会自动切换为 `uv run streamlit`。
-如需允许局域网内其他设备访问 WebUI，可以先执行 `set MPT_WEBUI_HOST=0.0.0.0`，再运行 `webui.bat`。
+如需允许局域网内其他设备访问 WebUI，可以先执行 `set VIDGEN_WEBUI_HOST=0.0.0.0`，再运行 `webui.bat`。
 
 ###### macOS 或 Linux
 
@@ -325,8 +325,13 @@ sh webui.sh
 脚本会自动使用项目虚拟环境或 `uv`，并选择可用的本地端口。如需允许局域网内其他设备访问，可以执行：
 
 ```shell
-MPT_WEBUI_HOST=0.0.0.0 sh webui.sh
+VIDGEN_WEBUI_HOST=0.0.0.0 sh webui.sh
 ```
+
+> **VidGen 更名说明：** 原 `MPT_*` 环境变量已改为 `VIDGEN_*`（`MPT_WEBUI_HOST` →
+> `VIDGEN_WEBUI_HOST`，`MPT_WEBUI_PORT` → `VIDGEN_WEBUI_PORT`，`MPT_APP_REDIS_HOST` →
+> `VIDGEN_APP_REDIS_HOST`）。旧变量名仍然可用，但会输出弃用提示；同时设置时以新变量名为准。
+> 仅用于测试的变量（`VIDGEN_RUN_INTEGRATION_TESTS`、`VIDGEN_TEST_REDIS_*`）**没有**保留回退。
 
 启动后，会自动打开浏览器（如果打开是空白，建议换成 **Chrome** 或者 **Edge** 打开）
 
@@ -381,10 +386,10 @@ model_size = "large-v3-turbo"
 
 > 首次使用 Whisper 时，程序会自动从 Hugging Face 下载模型。如果当前网络无法自动下载，可以从 [Hugging Face](https://huggingface.co/Systran/faster-whisper-large-v3) 手动下载 `whisper-large-v3`。
 
-下载并解压后，将整个目录放到 `.\MoneyPrinterTurbo\models`，最终路径应为 `.\MoneyPrinterTurbo\models\whisper-large-v3`：
+下载并解压后，将整个目录放到 `.\VidGen\models`，最终路径应为 `.\VidGen\models\whisper-large-v3`：
 
 ```
-MoneyPrinterTurbo
+VidGen
   ├─models
   │   └─whisper-large-v3
   │          config.json
@@ -489,7 +494,7 @@ Trying to load the model directly from the local cache, if it exists.
 
 ## 反馈建议 📢
 
-- 可以提交 [issue](https://github.com/harry0703/MoneyPrinterTurbo/issues) 或者 [pull request](https://github.com/harry0703/MoneyPrinterTurbo/pulls)。
+- 可以提交 [issue](https://github.com/SaidulBadhon/VidGen/issues) 或者 [pull request](https://github.com/SaidulBadhon/VidGen/pulls)。
 
 ## 许可证 📝
 
@@ -497,10 +502,10 @@ Trying to load the model directly from the local cache, if it exists.
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=harry0703%2FMoneyPrinterTurbo&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=SaidulBadhon%2FVidGen&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=harry0703/MoneyPrinterTurbo&type=date&theme=dark&legend=top-left&sealed_token=AtOR8By6GcNKd46eJLixrnucHF_99GOSBBKfc60pAm2xsDylemaYxDMcvTlPRz-G_onzDrs-hDrM0xdKkn0L6PgDin3fv02ViVtsZvgRYgk0YOzkX2KgLG8wro66VGphii-u6GNpzD8JocrqGGKvsFSpmbRqo5g-2mEDaN7-ESdtF48ZH0rDOCpoc1Mh" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=harry0703/MoneyPrinterTurbo&type=date&legend=top-left&sealed_token=AtOR8By6GcNKd46eJLixrnucHF_99GOSBBKfc60pAm2xsDylemaYxDMcvTlPRz-G_onzDrs-hDrM0xdKkn0L6PgDin3fv02ViVtsZvgRYgk0YOzkX2KgLG8wro66VGphii-u6GNpzD8JocrqGGKvsFSpmbRqo5g-2mEDaN7-ESdtF48ZH0rDOCpoc1Mh" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=harry0703/MoneyPrinterTurbo&type=date&legend=top-left&sealed_token=AtOR8By6GcNKd46eJLixrnucHF_99GOSBBKfc60pAm2xsDylemaYxDMcvTlPRz-G_onzDrs-hDrM0xdKkn0L6PgDin3fv02ViVtsZvgRYgk0YOzkX2KgLG8wro66VGphii-u6GNpzD8JocrqGGKvsFSpmbRqo5g-2mEDaN7-ESdtF48ZH0rDOCpoc1Mh" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=SaidulBadhon/VidGen&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=SaidulBadhon/VidGen&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=SaidulBadhon/VidGen&type=date&legend=top-left" />
  </picture>
 </a>

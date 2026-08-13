@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronUp, Loader2, Sparkles, Upload, Wand2 } from "lucide-react";
 import { api, subscribeToTask, type Task } from "./api/client.ts";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES, useI18n } from "./i18n/index.tsx";
+import { BgmPreview, VoicePreview } from "./components/AudioPreview.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { TaskManager } from "./components/TaskManager.tsx";
 import {
@@ -184,7 +185,7 @@ export default function App() {
     <div className="mx-auto max-w-[1400px] px-4 py-6">
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-baseline gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">MoneyPrinterTurbo 💸</h1>
+          <h1 className="text-xl font-semibold tracking-tight">VidGen 🎬</h1>
           {health.data && (
             <Badge tone={health.data.database === "ok" && health.data.ffmpeg === "ok" ? "success" : "danger"}>
               v{health.data.version}
@@ -509,6 +510,13 @@ export default function App() {
               />
             </Field>
 
+            <VoicePreview
+              voiceName={String(params.voice_name ?? "")}
+              voiceRate={Number(params.voice_rate ?? 1)}
+              voiceVolume={Number(params.voice_volume ?? 1)}
+              script={String(params.video_script ?? "")}
+            />
+
             <Field label={t("Background Music")}>
               <Select
                 value={String(params.bgm_type ?? "random")}
@@ -569,6 +577,13 @@ export default function App() {
                 format={(value) => value.toFixed(2)}
               />
             </Field>
+
+            <BgmPreview
+              bgmType={String(params.bgm_type ?? "")}
+              bgmFile={String(params.bgm_file ?? "")}
+              bgmVolume={Number(params.bgm_volume ?? 0.2)}
+              files={musics.data?.files ?? []}
+            />
 
             <hr className="border-border" />
 

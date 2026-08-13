@@ -1,6 +1,6 @@
-# MoneyPrinterTurbo Test Directory
+# VidGen Test Directory
 
-This directory contains unit tests for the **MoneyPrinterTurbo** project.
+This directory contains unit tests for the **VidGen** project.
 
 ## Directory Structure
 
@@ -38,8 +38,12 @@ uv run python -m coverage report
 ```
 
 Live provider tests are skipped by default. To run tests that may call external
-TTS or LLM services, set `MPT_RUN_INTEGRATION_TESTS=1` and provide the required
+TTS or LLM services, set `VIDGEN_RUN_INTEGRATION_TESTS=1` and provide the required
 provider credentials.
+
+These were `MPT_RUN_INTEGRATION_TESTS` and `MPT_TEST_REDIS_HOST`/`_PORT`/`_DB`
+before the VidGen rebrand. The old names are no longer read — test-only variables
+were renamed without a compatibility fallback.
 
 ## Adding New Tests
 

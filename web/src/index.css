@@ -8,6 +8,7 @@
  * strand a colour undefined.
  */
 :root {
+  color-scheme: light;
   --bg: #f6f7f9;
   --surface: #ffffff;
   --surface-2: #f1f3f5;
@@ -23,6 +24,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #0e1116;
     --surface: #161a21;
     --surface-2: #1d222b;
@@ -38,6 +40,7 @@
 }
 
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0e1116;
   --surface: #161a21;
   --surface-2: #1d222b;
@@ -88,4 +91,9 @@ body {
 
 input[type="range"] {
   accent-color: var(--accent);
+}
+
+audio.audio-preview {
+  height: 2.25rem;
+  border-radius: 0.5rem;
 }

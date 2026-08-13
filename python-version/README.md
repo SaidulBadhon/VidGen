@@ -1,4 +1,4 @@
-# MoneyPrinterTurbo — Python version (archived)
+# VidGen — Python version (archived)
 
 This is the original Python implementation (v1.3.4): FastAPI API + Streamlit WebUI + CLI.
 It has been superseded by the Bun/Hono/React/MongoDB rewrite at the repository root.

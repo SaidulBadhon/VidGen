@@ -32,7 +32,7 @@ export function registerSubtitleFont(fontPath: string): string {
   const cached = registeredFonts.get(fontPath);
   if (cached) return cached;
 
-  const family = `mpt-${basename(fontPath).replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9]+/g, "-")}`;
+  const family = `vidgen-${basename(fontPath).replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9]+/g, "-")}`;
   const ok = GlobalFonts.registerFromPath(fontPath, family);
   if (!ok) {
     logger.warning(`failed to register subtitle font: ${fontPath}; falling back to a system font`);

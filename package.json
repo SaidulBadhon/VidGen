@@ -1,5 +1,5 @@
 {
-  "name": "moneyprinterturbo",
+  "name": "vidgen",
   "version": "2.0.0",
   "private": true,
   "description": "Generate short videos from prompts, local assets, subtitles, and TTS.",

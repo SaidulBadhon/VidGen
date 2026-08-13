@@ -20,7 +20,7 @@ from loguru import logger
 from streamlit_tour import Tour
 
 # WebUI 作为独立入口运行时，需要让项目根目录优先于第三方依赖，
-# 避免依赖中的同名 app 包遮蔽 MoneyPrinterTurbo 自己的 app 包。
+# 避免依赖中的同名 app 包遮蔽 VidGen 自己的 app 包。
 root_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 if root_dir in sys.path:
     sys.path.remove(root_dir)
@@ -52,22 +52,22 @@ from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
 
 st.set_page_config(
-    page_title="MoneyPrinterTurbo",
+    page_title="VidGen",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
-        "Report a bug": "https://github.com/harry0703/MoneyPrinterTurbo/issues",
-        "About": "# MoneyPrinterTurbo\nSimply provide a topic or keyword for a video, and it will "
+        "Report a bug": "https://github.com/SaidulBadhon/VidGen/issues",
+        "About": "# VidGen\nSimply provide a topic or keyword for a video, and it will "
         "automatically generate the video copy, video materials, video subtitles, "
         "and video background music before synthesizing a high-definition short "
-        "video.\n\nhttps://github.com/harry0703/MoneyPrinterTurbo",
+        "video.\n\nhttps://github.com/SaidulBadhon/VidGen",
     },
 )
 
 
 # Streamlit 1.59 会在页面右上角默认展示 Deploy、skills nudge 等平台入口。
-# MoneyPrinterTurbo 是面向终端用户的本地工具，这些入口会造成顶部大块空白，
+# VidGen 是面向终端用户的本地工具，这些入口会造成顶部大块空白，
 # 也会让新用户误以为需要安装额外组件。这里统一隐藏 Streamlit 平台工具栏，
 # 并压缩主容器顶部留白，只保留项目自己的标题、语言选择和业务设置区域。
 style_file = Path(__file__).with_name("styles.css")
@@ -84,7 +84,7 @@ locales = utils.load_locales(i18n_dir)
 DEFAULT_CHATTERBOX_BASE_URL = "http://127.0.0.1:4123/v1"
 DEFAULT_CHATTERBOX_MODEL = "chatterbox"
 DEFAULT_CHATTERBOX_VOICES = ["default-Female"]
-ONBOARDING_TOUR_KEY = "mpt-onboarding-v1"
+ONBOARDING_TOUR_KEY = "vidgen-onboarding-v1"
 VOICE_MODE_TTS = "tts"
 VOICE_MODE_UPLOAD = "upload"
 VOICE_MODE_NONE = "none"
@@ -1140,7 +1140,7 @@ def _render_brand(available_update: str | None = None):
         # Streamlit 会继续用 Markdown 解析传入的 HTML。这里保持链接为单行，
         # 避免多行字符串的缩进被识别成代码块，导致页面直接显示 HTML 源码。
         update_link = (
-            '<a class="mpt-brand__update" '
+            '<a class="vidgen-brand__update" '
             f'href="{version_checker.LATEST_RELEASE_PAGE_URL}" '
             'target="_blank" rel="noopener noreferrer" '
             f'aria-label="{update_label}" title="{update_label}">'
@@ -1148,13 +1148,13 @@ def _render_brand(available_update: str | None = None):
         )
     st.markdown(
         f"""
-        <h1 class="mpt-brand">
-            <span class="mpt-brand__name">MoneyPrinterTurbo</span>
-            <a class="mpt-brand__version"
-               href="https://github.com/harry0703/MoneyPrinterTurbo"
+        <h1 class="vidgen-brand">
+            <span class="vidgen-brand__name">VidGen</span>
+            <a class="vidgen-brand__version"
+               href="https://github.com/SaidulBadhon/VidGen"
                target="_blank"
                rel="noopener noreferrer"
-               aria-label="Open MoneyPrinterTurbo on GitHub"
+               aria-label="Open VidGen on GitHub"
                title="Open project on GitHub">v{html.escape(str(config.project_version))}</a>
             {update_link}
         </h1>

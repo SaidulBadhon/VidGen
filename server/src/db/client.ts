@@ -11,7 +11,7 @@ import { logger } from "../utils/logger.ts";
 import type { MaterialCacheDocument, SettingsDocument, TaskDocument } from "./types.ts";
 
 const MONGODB_URI = process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017";
-const MONGODB_DB = process.env.MONGODB_DB ?? "moneyprinterturbo";
+const MONGODB_DB = process.env.MONGODB_DB ?? "vidgen";
 
 let client: MongoClient | undefined;
 let db: Db | undefined;

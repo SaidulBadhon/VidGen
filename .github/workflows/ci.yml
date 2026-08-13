@@ -25,7 +25,7 @@ jobs:
 
     env:
       MONGODB_URI: mongodb://127.0.0.1:27017
-      MONGODB_DB: moneyprinterturbo_ci
+      MONGODB_DB: vidgen_ci
 
     steps:
       - name: Check out repository

@@ -36,7 +36,7 @@ from app.utils import file_security, utils
 # 立即进入完成状态。
 _cross_post_executor = ThreadPoolExecutor(
     max_workers=2,
-    thread_name_prefix="mpt-cross-post",
+    thread_name_prefix="vidgen-cross-post",
 )
 _cross_post_max_pending_tasks = max(
     1,

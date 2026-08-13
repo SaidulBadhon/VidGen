@@ -21,6 +21,8 @@ import { buildProportionalCues } from "../src/services/voice/syntheticCues.ts";
 import { convertRateToPercent, generateSecMsGec } from "../src/services/voice/edgeTts.ts";
 import { estimateNoVoiceDuration } from "../src/services/voice/index.ts";
 import { isNoVoice, isAzureV2Voice, parseVoiceName, inferTtsServerFromVoice } from "../src/services/voice/voices.ts";
+import { detectAudioMime } from "../src/services/voice/preview.ts";
+import { voicePreviewRequestSchema } from "../src/models/schema.ts";
 import { matchesVideoAspect, filterMaterialsByAspect } from "../src/services/material/search.ts";
 import { materialSourceRecord } from "../src/services/material/download.ts";
 import { safePublicUrl } from "../src/services/material/http.ts";
@@ -78,7 +80,7 @@ describe("resolvePathWithinDirectory", () => {
   let base: string;
 
   beforeAll(() => {
-    base = mkdtempSync(join(tmpdir(), "mpt-sec-"));
+    base = mkdtempSync(join(tmpdir(), "vidgen-sec-"));
     writeFileSync(join(base, "clip.mp4"), "data");
     mkdirSync(join(base, "nested"));
     writeFileSync(join(base, "nested", "inner.mp4"), "data");
@@ -102,7 +104,7 @@ describe("resolvePathWithinDirectory", () => {
 
   test("rejects a symlink that escapes the base", () => {
     // A symlink is why containment is checked on the resolved real path.
-    const outside = mkdtempSync(join(tmpdir(), "mpt-out-"));
+    const outside = mkdtempSync(join(tmpdir(), "vidgen-out-"));
     writeFileSync(join(outside, "secret.mp4"), "data");
     symlinkSync(join(outside, "secret.mp4"), join(base, "escape.mp4"));
     expect(() => resolvePathWithinDirectory(base, "escape.mp4")).toThrow(UnsafePathError);
@@ -364,6 +366,36 @@ describe("voice helpers", () => {
     const long = estimateNoVoiceDuration("Artificial intelligence is reshaping how ordinary people work today.");
     expect(long).toBeGreaterThan(3.0);
     expect(estimateNoVoiceDuration("春天的花海如诗如画般展现在眼前万物复苏")).toBeGreaterThan(3.0);
+  });
+});
+
+describe("voice preview", () => {
+  test("sniffs WAV even when the filename says mp3", () => {
+    const wav = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x41, 0x56, 0x45]);
+    expect(detectAudioMime("preview.mp3", wav)).toBe("audio/wav");
+  });
+
+  test("sniffs mp3 from a frame sync or ID3 tag", () => {
+    expect(detectAudioMime("preview.mp3", new Uint8Array([0x49, 0x44, 0x33, 0, 0, 0, 0, 0, 0, 0, 0, 0]))).toBe(
+      "audio/mpeg",
+    );
+    expect(detectAudioMime("preview.bin", new Uint8Array([0xff, 0xfb, 0, 0]))).toBe("audio/mpeg");
+  });
+
+  test("falls back to the file extension", () => {
+    expect(detectAudioMime("preview.ogg", new Uint8Array([0, 1, 2, 3]))).toBe("audio/ogg");
+    expect(detectAudioMime("preview.mp3", new Uint8Array([0, 1, 2, 3]))).toBe("audio/mpeg");
+  });
+
+  test("rejects an empty voice name and overlong text", () => {
+    expect(() => voicePreviewRequestSchema.parse({ voice_name: "", text: "hello" })).toThrow();
+    expect(() => voicePreviewRequestSchema.parse({ voice_name: "en-US-AriaNeural-Female", text: "x".repeat(8001) })).toThrow();
+    expect(voicePreviewRequestSchema.parse({ voice_name: "en-US-AriaNeural-Female", text: "hello" })).toMatchObject({
+      voice_name: "en-US-AriaNeural-Female",
+      voice_rate: 1,
+      voice_volume: 1,
+      text: "hello",
+    });
   });
 });
 

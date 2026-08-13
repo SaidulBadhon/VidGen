@@ -212,6 +212,15 @@ export const videoSocialMetadataRequestSchema = z.object({
 });
 export type VideoSocialMetadataRequest = z.infer<typeof videoSocialMetadataRequestSchema>;
 
+/** POST /api/v1/voices/preview — short or full-script TTS listen. */
+export const voicePreviewRequestSchema = z.object({
+  voice_name: z.string().min(1),
+  voice_rate: z.number().min(0.5).max(2).default(1),
+  voice_volume: z.number().min(0).max(5).default(1),
+  text: z.string().min(1).max(8000),
+});
+export type VoicePreviewRequest = z.infer<typeof voicePreviewRequestSchema>;
+
 /** Normalises `video_terms` into a trimmed list, whatever form it arrived in. */
 export function normalizeVideoTerms(terms: string | string[] | null | undefined): string[] {
   if (!terms) return [];
