@@ -7,6 +7,10 @@
  * `bun run cli` produces a video with no server running.
  */
 
+// Must come first: it populates process.env from the root .env, and the
+// modules below read it while they are being evaluated.
+import "./config/dotenv.ts";
+
 import { parseArgs } from "node:util";
 import { connect, disconnect } from "./db/client.ts";
 import { initSettings } from "./config/settings.ts";

@@ -65,9 +65,12 @@ bun install
 # MongoDB, if you do not already have one
 docker run -d --name vidgen-mongo -p 27017:27017 mongo:7
 
-bun run dev:server     # API + worker on :8080
-bun run dev:web        # Vite dev server on :5173, proxying to the API
+bun run dev            # API + worker on :7778, Vite UI on :7777
+bun run dev:server     # API + worker on :7778
+bun run dev:web        # Vite dev server on :7777, proxying to the API
 ```
+
+Then open <http://127.0.0.1:7777>.
 
 For a single-process production run:
 
@@ -85,12 +88,34 @@ There is no config file. Settings live in MongoDB and are edited in the UI under
 `GET`/`POST /api/v1/settings`. API keys are write-only: reads return a `__stored__`
 placeholder, and sending that placeholder back leaves the stored key untouched.
 
-Only deployment-level values come from the environment — see [`.env.example`](.env.example):
+Deployment-level values come from the environment — see [`.env.example`](.env.example):
 
 ```
 MONGODB_URI, MONGODB_DB, LISTEN_HOST, LISTEN_PORT, LOG_LEVEL,
 ENDPOINT, CORS_ALLOWED_ORIGINS, FFMPEG_PATH, FFPROBE_PATH, WHISPER_CPP_PATH
 ```
+
+### Provider keys in `.env`
+
+LLM and stock-video credentials can be set there too, which is usually what you
+want for a container or anything scripted — the key survives a wiped Mongo
+volume, and it never has to be typed into a browser:
+
+```
+GEMINI_API_KEY, OPENAI_API_KEY, GEMMA_API_KEY
+PEXELS_API_KEYS, PIXABAY_API_KEYS, COVERR_API_KEYS, TWELVELABS_API_KEYS
+```
+
+The material variables take a comma-separated list, and the app rotates through
+the keys when one hits its rate limit; the singular spelling (`PEXELS_API_KEY`)
+works as well. A value set here wins over one saved through the UI, and the
+matching field is shown read-only so the two cannot silently disagree. An empty
+or absent variable falls back to the stored value, and nothing from the
+environment is ever written into MongoDB.
+
+The file is read from the repository root, so it applies to `bun run dev`,
+`bun run start` and `bun run cli` alike. Real environment variables take
+precedence over it, which is how `docker compose` passes these through.
 
 ### Providers
 

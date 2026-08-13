@@ -19,20 +19,88 @@ import {
 
 const SETTINGS_ID = "settings" as const;
 
+/** Exactly what is in Mongo. Writes merge over this, never over `cache`. */
+let stored: Settings = defaultSettings();
+/** `stored` with the environment applied. This is what every service reads. */
 let cache: Settings = defaultSettings();
 let loaded = false;
 
-/** Env vars that win over the stored document, for container deployments. */
-function applyEnvOverrides(settings: Settings): Settings {
-  const endpoint = process.env.ENDPOINT?.trim();
-  if (endpoint) settings.app.endpoint = endpoint;
+interface EnvBinding {
+  readonly section: SettingsSection;
+  readonly key: string;
+  /** First non-empty variable wins; the plural form is the documented name. */
+  readonly envVars: readonly string[];
+  /** Comma-separated in the environment, a key-rotation list in settings. */
+  readonly list?: boolean;
+}
 
-  const logLevel = process.env.LOG_LEVEL?.trim();
-  if (logLevel) {
-    // Kept only so the value shows up in the settings UI as read-only context.
-    logger.debug(`log level from environment: ${logLevel}`);
+/**
+ * Settings the environment can supply, and which then win over the document.
+ *
+ * Provider credentials belong in `.env` for anything scripted or containerised:
+ * the deployment already has a secrets mechanism there, whereas a key that
+ * lives only in Mongo has to be re-entered through the UI on every fresh
+ * volume. The settings UI shows these fields read-only so the two sources can
+ * never disagree without the user seeing why.
+ */
+const ENV_BINDINGS: readonly EnvBinding[] = [
+  { section: "app", key: "endpoint", envVars: ["ENDPOINT"] },
+
+  // LLM providers.
+  { section: "app", key: "gemini_api_key", envVars: ["GEMINI_API_KEY"] },
+  { section: "app", key: "openai_api_key", envVars: ["OPENAI_API_KEY"] },
+  { section: "app", key: "gemma_api_key", envVars: ["GEMMA_API_KEY"] },
+
+  // Video material providers.
+  { section: "app", key: "pexels_api_keys", envVars: ["PEXELS_API_KEYS", "PEXELS_API_KEY"], list: true },
+  { section: "app", key: "pixabay_api_keys", envVars: ["PIXABAY_API_KEYS", "PIXABAY_API_KEY"], list: true },
+  { section: "app", key: "coverr_api_keys", envVars: ["COVERR_API_KEYS", "COVERR_API_KEY"], list: true },
+  {
+    section: "app",
+    key: "twelvelabs_api_keys",
+    envVars: ["TWELVELABS_API_KEYS", "TWELVELABS_API_KEY"],
+    list: true,
+  },
+];
+
+/** The bound value from the environment, or undefined when nothing is set. */
+function envValue(binding: EnvBinding): string | string[] | undefined {
+  for (const name of binding.envVars) {
+    const raw = process.env[name]?.trim();
+    // An empty variable means "not set", so a blank line in .env cannot wipe a
+    // key that was configured through the UI.
+    if (!raw) continue;
+    if (!binding.list) return raw;
+
+    const keys = raw.split(",").map((key) => key.trim()).filter(Boolean);
+    if (keys.length > 0) return keys;
   }
-  return settings;
+  return undefined;
+}
+
+/**
+ * Overlays the environment onto a stored settings object.
+ *
+ * Returns a copy: the caller keeps the pristine document, which is what makes
+ * a later `updateSettings` incapable of persisting an environment secret.
+ */
+export function applyEnvOverrides(settings: Settings): Settings {
+  const effective = structuredClone(settings) as Settings;
+
+  for (const binding of ENV_BINDINGS) {
+    const value = envValue(binding);
+    if (value === undefined) continue;
+    (effective[binding.section] as Record<string, unknown>)[binding.key] = value;
+  }
+
+  return effective;
+}
+
+/** Dotted paths currently supplied by the environment, for the settings UI. */
+export function envManagedSettingPaths(): string[] {
+  return ENV_BINDINGS.filter((binding) => envValue(binding) !== undefined).map(
+    (binding) => `${binding.section}.${binding.key}`,
+  );
 }
 
 /**
@@ -44,26 +112,32 @@ export async function initSettings(): Promise<Settings> {
   const existing = await collection.findOne({ _id: SETTINGS_ID });
 
   if (!existing) {
-    const seeded = defaultSettings();
-    await collection.insertOne({ _id: SETTINGS_ID, data: seeded, updated_at: new Date() });
+    stored = defaultSettings();
+    await collection.insertOne({ _id: SETTINGS_ID, data: stored, updated_at: new Date() });
     logger.info("seeded default settings document");
-    cache = applyEnvOverrides(seeded);
-    loaded = true;
-    return cache;
-  }
-
-  // Parsing through the schema fills in any field added since the document was
-  // written, so an upgrade never needs a migration step.
-  const parsed = settingsSchema.safeParse(existing.data ?? {});
-  if (!parsed.success) {
-    logger.warning(
-      `stored settings failed validation, falling back to defaults for the invalid fields: ${parsed.error.message}`,
-    );
-    cache = applyEnvOverrides(mergeSettings(defaultSettings(), (existing.data ?? {}) as PartialSettings));
   } else {
-    cache = applyEnvOverrides(parsed.data);
+    // Parsing through the schema fills in any field added since the document
+    // was written, so an upgrade never needs a migration step.
+    const parsed = settingsSchema.safeParse(existing.data ?? {});
+    if (!parsed.success) {
+      logger.warning(
+        `stored settings failed validation, falling back to defaults for the invalid fields: ${parsed.error.message}`,
+      );
+      stored = mergeSettings(defaultSettings(), (existing.data ?? {}) as PartialSettings);
+    } else {
+      stored = parsed.data;
+    }
   }
 
+  const logLevel = process.env.LOG_LEVEL?.trim();
+  if (logLevel) logger.debug(`log level from environment: ${logLevel}`);
+
+  const fromEnv = envManagedSettingPaths();
+  if (fromEnv.length > 0) {
+    logger.info(`settings supplied by the environment: ${fromEnv.join(", ")}`);
+  }
+
+  cache = applyEnvOverrides(stored);
   loaded = true;
   return cache;
 }
@@ -105,8 +179,14 @@ function mergeSettings(base: Settings, patch: PartialSettings): Settings {
  * can save one panel without resending everything it did not display.
  */
 export async function updateSettings(patch: PartialSettings): Promise<Settings> {
-  const candidate = mergeSettings(getSettings(), patch);
-  const parsed = settingsSchema.parse(candidate);
+  if (!loaded) {
+    throw new Error("settings have not been loaded; call initSettings() during startup");
+  }
+
+  // Merged over the stored document rather than the effective one, so a value
+  // that only ever came from the environment is not copied into Mongo — where
+  // it would outlive the variable and shadow a later change to it.
+  const parsed = settingsSchema.parse(mergeSettings(stored, patch));
 
   await settingsCollection().updateOne(
     { _id: SETTINGS_ID },
@@ -114,7 +194,8 @@ export async function updateSettings(patch: PartialSettings): Promise<Settings> 
     { upsert: true },
   );
 
-  cache = applyEnvOverrides(parsed);
+  stored = parsed;
+  cache = applyEnvOverrides(stored);
   logger.info(`settings updated: ${Object.keys(patch).join(", ")}`);
   return cache;
 }
@@ -172,8 +253,14 @@ export function stripPlaceholderSecrets(patch: PartialSettings): PartialSettings
   return cleaned;
 }
 
-/** Test seam: installs a settings object without touching Mongo. */
+/**
+ * Test seam: installs a settings object without touching Mongo.
+ *
+ * The environment is deliberately not overlaid — a test asserting on a key
+ * would otherwise depend on whatever the developer has exported in their shell.
+ */
 export function __setSettingsForTest(settings: Settings): void {
+  stored = settings;
   cache = settings;
   loaded = true;
 }

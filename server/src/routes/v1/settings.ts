@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import { readdirSync } from "node:fs";
 import {
+  envManagedSettingPaths,
   redactSettings,
   stripPlaceholderSecrets,
   updateSettings,
@@ -37,10 +38,15 @@ settingsRouter.post("/settings", async (c) => {
 /**
  * Static metadata the settings UI needs: provider list, encoder whitelist, and
  * the fonts actually present in resource/fonts.
+ *
+ * `env_managed_fields` lists the settings the environment currently supplies.
+ * It only changes on restart, so it belongs with the rest of the static
+ * metadata rather than in the settings payload itself.
  */
 settingsRouter.get("/settings/metadata", (c) => {
   return c.json(
     getResponse(200, {
+      env_managed_fields: envManagedSettingPaths(),
       llm_providers: LLM_PROVIDER_REGISTRY.map((provider) => ({
         provider_id: provider.providerId,
         label: provider.defaultLabel,

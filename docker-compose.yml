@@ -31,6 +31,15 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       ENDPOINT: ${ENDPOINT:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      # Provider credentials. The image has no .env, so these are forwarded
+      # from the .env next to this file, which Compose reads by itself.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
+      PEXELS_API_KEYS: ${PEXELS_API_KEYS:-${PEXELS_API_KEY:-}}
+      PIXABAY_API_KEYS: ${PIXABAY_API_KEYS:-${PIXABAY_API_KEY:-}}
+      COVERR_API_KEYS: ${COVERR_API_KEYS:-${COVERR_API_KEY:-}}
+      TWELVELABS_API_KEYS: ${TWELVELABS_API_KEYS:-${TWELVELABS_API_KEY:-}}
     volumes:
       # Generated videos, downloaded materials, uploaded BGM and local clips.
       - ./storage:/app/storage

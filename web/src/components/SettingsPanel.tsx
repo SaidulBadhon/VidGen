@@ -57,6 +57,16 @@ export function SettingsPanel() {
     [metadataQuery.data, provider],
   );
 
+  /**
+   * Fields the server reads from `.env`. Editing one here would be discarded on
+   * the next read, so the input is shown read-only rather than silently ignored.
+   */
+  const envManaged = useMemo(
+    () => new Set(metadataQuery.data?.env_managed_fields ?? []),
+    [metadataQuery.data],
+  );
+  const fromEnv = (key: string, section: keyof Settings = "app") => envManaged.has(`${section}.${key}`);
+
   if (!draft) {
     return (
       <Card>
@@ -111,9 +121,13 @@ export function SettingsPanel() {
             </Field>
 
             {providerSpec?.show_api_key && (
-              <Field label={`${providerSpec.label} API Key`}>
+              <Field
+                label={`${providerSpec.label} API Key`}
+                hint={fromEnv(`${provider}_api_key`) ? t("Set in .env") : undefined}
+              >
                 <TextInput
                   type="password"
+                  disabled={fromEnv(`${provider}_api_key`)}
                   value={String(draft.app[`${provider}_api_key`] ?? "")}
                   placeholder={
                     draft.app[`${provider}_api_key`] === SECRET_PLACEHOLDER ? t("Saved") : "sk-..."
@@ -256,9 +270,10 @@ export function SettingsPanel() {
                     </a>
                   </span>
                 }
-                hint={t("Separate multiple keys with commas")}
+                hint={fromEnv(key) ? t("Set in .env") : t("Separate multiple keys with commas")}
               >
                 <TextInput
+                  disabled={fromEnv(key)}
                   value={keysToText(draft.app[key])}
                   onChange={(event) => setApp(key, textToKeys(event.target.value))}
                 />
@@ -267,8 +282,12 @@ export function SettingsPanel() {
           </div>
 
           <div className="space-y-4">
-            <Field label="TwelveLabs API Keys" hint={t("Optional semantic reranking")}>
+            <Field
+              label="TwelveLabs API Keys"
+              hint={fromEnv("twelvelabs_api_keys") ? t("Set in .env") : t("Optional semantic reranking")}
+            >
               <TextInput
+                disabled={fromEnv("twelvelabs_api_keys")}
                 value={keysToText(draft.app.twelvelabs_api_keys)}
                 onChange={(event) => setApp("twelvelabs_api_keys", textToKeys(event.target.value))}
               />
@@ -356,8 +375,12 @@ export function SettingsPanel() {
             </Field>
           </div>
           <div className="space-y-4">
-            <Field label={t("Public Endpoint")} hint={t("Used to build download links")}>
+            <Field
+              label={t("Public Endpoint")}
+              hint={fromEnv("endpoint") ? t("Set in .env") : t("Used to build download links")}
+            >
               <TextInput
+                disabled={fromEnv("endpoint")}
                 value={String(draft.app.endpoint ?? "")}
                 placeholder="https://videos.example.com"
                 onChange={(event) => setApp("endpoint", event.target.value)}

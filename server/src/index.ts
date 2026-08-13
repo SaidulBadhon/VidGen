@@ -6,6 +6,10 @@
  * separate uvicorn and Streamlit processes of the Python version.
  */
 
+// Must come first: it populates process.env from the root .env, and the
+// modules below read it while they are being evaluated.
+import "./config/dotenv.ts";
+
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { connect, disconnect } from "./db/client.ts";
@@ -72,7 +76,7 @@ app.get("*", (c) => {
   return c.text(
     `${PROJECT_NAME} API is running (v${APP_VERSION}).\n\n` +
       `The web UI has not been built yet. Run:\n  bun run build\n\n` +
-      `Or start the Vite dev server on :5173 with:\n  bun run dev:web\n`,
+      `Or start the Vite dev server on :7777 with:\n  bun run dev:web\n`,
     200,
     { "Content-Type": "text/plain; charset=utf-8" },
   );

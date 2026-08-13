@@ -60,6 +60,8 @@ export interface Settings {
 }
 
 export interface SettingsMetadata {
+  /** Dotted paths (`app.openai_api_key`) the server takes from the environment. */
+  env_managed_fields: string[];
   llm_providers: {
     provider_id: string;
     label: string;

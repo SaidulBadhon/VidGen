@@ -5,7 +5,7 @@
   "type": "module",
   "module": "src/index.ts",
   "scripts": {
-    "dev": "bun --watch src/index.ts",
+    "dev": "LISTEN_PORT=7778 bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "cli": "bun src/cli.ts",
     "test": "bun test",
