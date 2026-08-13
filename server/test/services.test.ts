@@ -1,0 +1,532 @@
+/**
+ * Service-layer logic that needs no network or database.
+ * Cases ported from python-version/test/services/.
+ */
+
+import { beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { defaultSettings, settingsSchema } from "../src/config/schema.ts";
+import { __setSettingsForTest } from "../src/config/settings.ts";
+import { decodeLinuxRouteGateway } from "../src/config/runtime.ts";
+import { resolvePathWithinDirectory, sanitizeUploadFilename, UnsafePathError } from "../src/utils/fileSecurity.ts";
+import { parseByteRange } from "../src/http/staticFiles.ts";
+import { sanitizeBgmFilename, shouldUseBgm, BgmUploadError } from "../src/services/bgm.ts";
+import { parseSrtContent, formatSrt } from "../src/services/subtitle/srt.ts";
+import { correctSubtitleCues } from "../src/services/subtitle/correct.ts";
+import { createSubtitleCues, matchScriptLine, formatTextForSubtitles } from "../src/services/voice/subtitles.ts";
+import { buildProportionalCues } from "../src/services/voice/syntheticCues.ts";
+import { convertRateToPercent, generateSecMsGec } from "../src/services/voice/edgeTts.ts";
+import { estimateNoVoiceDuration } from "../src/services/voice/index.ts";
+import { isNoVoice, isAzureV2Voice, parseVoiceName, inferTtsServerFromVoice } from "../src/services/voice/voices.ts";
+import { matchesVideoAspect, filterMaterialsByAspect } from "../src/services/material/search.ts";
+import { materialSourceRecord } from "../src/services/material/download.ts";
+import { safePublicUrl } from "../src/services/material/http.ts";
+import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt } from "../src/services/llm/prompts.ts";
+import { extractJson, formatScriptResponse, stripCodeFence } from "../src/services/llm/index.ts";
+import { isOwnerAlive, parseOwner, PROCESS_OWNER_ID } from "../src/tasks/owner.ts";
+
+beforeAll(() => {
+  __setSettingsForTest(defaultSettings());
+});
+
+// ---------------------------------------------------------------------------
+
+describe("settings schema", () => {
+  test("produces a complete object from an empty document", () => {
+    const settings = defaultSettings();
+    expect(settings.app.llm_provider).toBe("gemini");
+    expect(settings.app.video_source).toBe("pexels");
+    expect(settings.app.max_concurrent_tasks).toBe(5);
+    expect(settings.whisper.provider).toBe("whisper-cpp");
+    expect(settings.ui.font_name).toBe("MicrosoftYaHeiBold.ttc");
+  });
+
+  test("backfills fields missing from a stored document", () => {
+    // An upgrade must not need a migration step.
+    const parsed = settingsSchema.parse({ app: { llm_provider: "openai" } });
+    expect(parsed.app.llm_provider).toBe("openai");
+    expect(parsed.app.max_queued_tasks).toBe(100);
+    expect(parsed.elevenlabs.model_id).toBe("eleven_multilingual_v2");
+  });
+
+  test("normalises a single API key into a list", () => {
+    const parsed = settingsSchema.parse({ app: { pexels_api_keys: "solo-key" } });
+    expect(parsed.app.pexels_api_keys).toEqual(["solo-key"]);
+  });
+
+  test("rejects an unsupported enum value", () => {
+    expect(() => settingsSchema.parse({ app: { video_source: "youtube" } })).toThrow();
+  });
+});
+
+describe("decodeLinuxRouteGateway", () => {
+  test("decodes the little-endian hex gateway", () => {
+    expect(decodeLinuxRouteGateway("010011AC")).toBe("172.17.0.1");
+  });
+
+  test("rejects a malformed field", () => {
+    expect(() => decodeLinuxRouteGateway("0100")).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("resolvePathWithinDirectory", () => {
+  let base: string;
+
+  beforeAll(() => {
+    base = mkdtempSync(join(tmpdir(), "mpt-sec-"));
+    writeFileSync(join(base, "clip.mp4"), "data");
+    mkdirSync(join(base, "nested"));
+    writeFileSync(join(base, "nested", "inner.mp4"), "data");
+  });
+
+  test("accepts a bare filename", () => {
+    expect(resolvePathWithinDirectory(base, "clip.mp4")).toContain("clip.mp4");
+  });
+
+  test("accepts a nested relative path", () => {
+    expect(resolvePathWithinDirectory(base, "nested/inner.mp4")).toContain("inner.mp4");
+  });
+
+  test("rejects traversal", () => {
+    expect(() => resolvePathWithinDirectory(base, "../../etc/passwd")).toThrow(UnsafePathError);
+  });
+
+  test("rejects an absolute path outside the base", () => {
+    expect(() => resolvePathWithinDirectory(base, "/etc/passwd")).toThrow(UnsafePathError);
+  });
+
+  test("rejects a symlink that escapes the base", () => {
+    // A symlink is why containment is checked on the resolved real path.
+    const outside = mkdtempSync(join(tmpdir(), "mpt-out-"));
+    writeFileSync(join(outside, "secret.mp4"), "data");
+    symlinkSync(join(outside, "secret.mp4"), join(base, "escape.mp4"));
+    expect(() => resolvePathWithinDirectory(base, "escape.mp4")).toThrow(UnsafePathError);
+  });
+
+  test("reports a missing file distinctly", () => {
+    expect(() => resolvePathWithinDirectory(base, "nope.mp4")).toThrow("file does not exist");
+  });
+
+  test("rejects an empty path", () => {
+    expect(() => resolvePathWithinDirectory(base, "")).toThrow(UnsafePathError);
+  });
+});
+
+describe("sanitizeUploadFilename", () => {
+  test("keeps only the final segment", () => {
+    expect(sanitizeUploadFilename("a/b/c.mp4")).toBe("c.mp4");
+    expect(sanitizeUploadFilename("..\\..\\evil.mp4")).toBe("evil.mp4");
+  });
+
+  test("rejects empty and dot names", () => {
+    expect(() => sanitizeUploadFilename("")).toThrow(UnsafePathError);
+    expect(() => sanitizeUploadFilename("..")).toThrow(UnsafePathError);
+  });
+});
+
+describe("parseByteRange", () => {
+  test("returns the whole file without a Range header", () => {
+    expect(parseByteRange(null, 1000)).toEqual({ start: 0, end: 999 });
+  });
+
+  test("parses an explicit range", () => {
+    expect(parseByteRange("bytes=0-499", 1000)).toEqual({ start: 0, end: 499 });
+    expect(parseByteRange("bytes=500-", 1000)).toEqual({ start: 500, end: 999 });
+  });
+
+  test("parses a suffix range", () => {
+    expect(parseByteRange("bytes=-200", 1000)).toEqual({ start: 800, end: 999 });
+  });
+
+  test("clamps an over-long end", () => {
+    expect(parseByteRange("bytes=0-5000", 1000)).toEqual({ start: 0, end: 999 });
+  });
+
+  test("rejects malformed, multi-part and out-of-bounds ranges", () => {
+    // Serving one part with a mismatched Content-Range is worse than a 416.
+    expect(parseByteRange("bytes=0-100,200-300", 1000)).toBe("unsatisfiable");
+    expect(parseByteRange("items=0-100", 1000)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=2000-3000", 1000)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=-", 1000)).toBe("unsatisfiable");
+    expect(parseByteRange("bytes=0-499", 0)).toBe("unsatisfiable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("shouldUseBgm", () => {
+  test("requires both a source and a positive volume", () => {
+    expect(shouldUseBgm("random", 0.2)).toBe(true);
+    expect(shouldUseBgm("random", 0)).toBe(false);
+    expect(shouldUseBgm("", 0.5)).toBe(false);
+    expect(shouldUseBgm(null, 0.5)).toBe(false);
+    expect(shouldUseBgm("sonilo", -1)).toBe(false);
+    expect(shouldUseBgm("sonilo", Number.NaN)).toBe(false);
+  });
+});
+
+describe("sanitizeBgmFilename", () => {
+  test("accepts supported audio formats", () => {
+    expect(sanitizeBgmFilename("track.mp3")).toBe("track.mp3");
+    expect(sanitizeBgmFilename("a/b/track.FLAC")).toBe("track.FLAC");
+  });
+
+  test("rejects unsupported formats", () => {
+    expect(() => sanitizeBgmFilename("movie.mp4")).toThrow(BgmUploadError);
+  });
+
+  test("rejects Windows reserved device names", () => {
+    // CON.mp3 cannot exist as an ordinary file on Windows.
+    expect(() => sanitizeBgmFilename("CON.mp3")).toThrow(BgmUploadError);
+    expect(() => sanitizeBgmFilename("lpt1.wav")).toThrow(BgmUploadError);
+  });
+
+  test("rejects internal staging names", () => {
+    expect(() => sanitizeBgmFilename(".bgm-upload-abc.mp3")).toThrow(BgmUploadError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("SRT round-trip", () => {
+  const srt = `1
+00:00:00,100 --> 00:00:02,000
+First line
+
+2
+00:00:02,100 --> 00:00:04,000
+Second line
+`;
+
+  test("parses cues", () => {
+    const cues = parseSrtContent(srt);
+    expect(cues).toHaveLength(2);
+    expect(cues[0]).toMatchObject({ start: 0.1, end: 2, text: "First line" });
+  });
+
+  test("keeps a final cue with no trailing blank line", () => {
+    const cues = parseSrtContent("1\n00:00:00,000 --> 00:00:01,000\nOnly");
+    expect(cues).toHaveLength(1);
+    expect(cues[0]!.text).toBe("Only");
+  });
+
+  test("formats back to equivalent text", () => {
+    expect(parseSrtContent(formatSrt(parseSrtContent(srt)))).toEqual(parseSrtContent(srt));
+  });
+});
+
+describe("matchScriptLine", () => {
+  const lines = ["Hello world", "春天的花海"];
+
+  test("matches exactly", () => {
+    expect(matchScriptLine(lines, "Hello world", 0)).toBe("Hello world");
+  });
+
+  test("matches after stripping punctuation", () => {
+    expect(matchScriptLine(lines, "Hello, world!", 0)).toBe("Hello world");
+  });
+
+  test("matches CJK, which ASCII \\W would have destroyed", () => {
+    // JavaScript's \W is ASCII-only; using it stripped every CJK character and
+    // made the first cue match the whole line.
+    expect(matchScriptLine(lines, "春天的花海", 1)).toBe("春天的花海");
+    expect(matchScriptLine(lines, "春天", 1)).toBe("");
+  });
+
+  test("returns empty past the end of the script", () => {
+    expect(matchScriptLine(lines, "anything", 5)).toBe("");
+  });
+});
+
+describe("createSubtitleCues", () => {
+  test("aggregates word cues into script lines", () => {
+    const cues = createSubtitleCues(
+      [
+        { start: 0.0, end: 0.5, content: "Hello" },
+        { start: 0.5, end: 1.0, content: " world" },
+        { start: 1.2, end: 1.6, content: "Good" },
+        { start: 1.6, end: 2.0, content: " bye" },
+      ],
+      "Hello world. Good bye.",
+    );
+
+    expect(cues).toHaveLength(2);
+    expect(cues[0]).toMatchObject({ start: 0, end: 1, text: "Hello world" });
+    expect(cues[1]).toMatchObject({ start: 1.2, end: 2, text: "Good bye" });
+  });
+
+  test("returns nothing when coverage is incomplete", () => {
+    // A partial track would drift out of sync, so no subtitles is safer.
+    expect(createSubtitleCues([{ start: 0, end: 1, content: "Hello world" }], "Hello world. Missing line.")).toEqual([]);
+  });
+});
+
+describe("formatTextForSubtitles", () => {
+  test("removes brackets the narrator never speaks", () => {
+    expect(formatTextForSubtitles("Hello [pause] (aside) {note}")).toBe("Hello  pause   aside   note");
+  });
+});
+
+describe("buildProportionalCues", () => {
+  test("spreads duration across sentences by length", () => {
+    const cues = buildProportionalCues("Short. A much longer sentence here.", 10);
+    expect(cues).toHaveLength(2);
+    expect(cues[0]!.start).toBe(0);
+    // The final cue always absorbs the remainder so timing never falls short.
+    expect(cues[cues.length - 1]!.end).toBe(10);
+    expect(cues[1]!.end - cues[1]!.start).toBeGreaterThan(cues[0]!.end - cues[0]!.start);
+  });
+
+  test("returns nothing for empty text", () => {
+    expect(buildProportionalCues("", 10)).toEqual([]);
+  });
+});
+
+describe("correctSubtitleCues", () => {
+  test("leaves a matching transcription untouched", () => {
+    const cues = [
+      { index: 1, start: 0, end: 1, text: "Hello world" },
+      { index: 2, start: 1, end: 2, text: "Good bye" },
+    ];
+    const result = correctSubtitleCues(cues, "Hello world. Good bye.");
+    expect(result.corrected).toBe(false);
+    expect(result.cues.map((cue) => cue.text)).toEqual(["Hello world", "Good bye"]);
+  });
+
+  test("merges split cues and restores the script wording", () => {
+    const cues = [
+      { index: 1, start: 0, end: 0.6, text: "Hello" },
+      { index: 2, start: 0.6, end: 1.2, text: "wrld" },
+      { index: 3, start: 1.3, end: 2, text: "Good bye" },
+    ];
+    const result = correctSubtitleCues(cues, "Hello world. Good bye.");
+    expect(result.corrected).toBe(true);
+    expect(result.cues[0]).toMatchObject({ start: 0, end: 1.2, text: "Hello world" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("voice helpers", () => {
+  test("strips the display gender suffix", () => {
+    expect(parseVoiceName("zh-CN-XiaoyiNeural-Female")).toBe("zh-CN-XiaoyiNeural");
+    expect(parseVoiceName("zh-CN-XiaoxiaoMultilingualNeural-V2-Female")).toBe(
+      "zh-CN-XiaoxiaoMultilingualNeural-V2",
+    );
+  });
+
+  test("detects Azure V2 voices", () => {
+    expect(isAzureV2Voice("zh-CN-XiaoxiaoMultilingualNeural-V2-Female")).toBe(
+      "zh-CN-XiaoxiaoMultilingualNeural",
+    );
+    expect(isAzureV2Voice("zh-CN-XiaoyiNeural-Female")).toBe("");
+  });
+
+  test("treats only the explicit sentinel as no-voice", () => {
+    // An empty voice is far more likely to be a broken config than intent.
+    expect(isNoVoice("no-voice")).toBe(true);
+    expect(isNoVoice("none")).toBe(true);
+    expect(isNoVoice("")).toBe(false);
+    expect(isNoVoice(null)).toBe(false);
+  });
+
+  test("infers the TTS server from the voice", () => {
+    expect(inferTtsServerFromVoice("elevenlabs:abc:Rachel")).toBe("elevenlabs");
+    expect(inferTtsServerFromVoice("gemini:Zephyr-Female")).toBe("gemini");
+    expect(inferTtsServerFromVoice("en-US-AriaNeural-Female")).toBe("azure-tts-v1");
+  });
+
+  test("formats the speech rate as a signed percentage", () => {
+    // "0%" without a sign is rejected by the service.
+    expect(convertRateToPercent(1.0)).toBe("+0%");
+    expect(convertRateToPercent(1.004)).toBe("+0%");
+    expect(convertRateToPercent(1.2)).toBe("+20%");
+    expect(convertRateToPercent(0.8)).toBe("-20%");
+    expect(convertRateToPercent(0)).toBe("+0%");
+    expect(convertRateToPercent(null)).toBe("+0%");
+  });
+
+  test("generates a stable anti-abuse token", () => {
+    const token = generateSecMsGec(1786000000);
+    expect(token).toMatch(/^[0-9A-F]{64}$/);
+    // Rounded to a 5-minute window, so nearby times agree.
+    expect(generateSecMsGec(1786000100)).toBe(token);
+  });
+
+  test("estimates a usable no-voice duration", () => {
+    expect(estimateNoVoiceDuration("")).toBe(3.0);
+    expect(estimateNoVoiceDuration("hi")).toBe(3.0);
+    const long = estimateNoVoiceDuration("Artificial intelligence is reshaping how ordinary people work today.");
+    expect(long).toBeGreaterThan(3.0);
+    expect(estimateNoVoiceDuration("春天的花海如诗如画般展现在眼前万物复苏")).toBeGreaterThan(3.0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("matchesVideoAspect", () => {
+  test("uses dimensions when available", () => {
+    expect(matchesVideoAspect(1080, 1920, "9:16")).toBe(true);
+    expect(matchesVideoAspect(1920, 1080, "9:16")).toBe(false);
+    expect(matchesVideoAspect(1920, 1080, "16:9")).toBe(true);
+    expect(matchesVideoAspect(1080, 1080, "1:1")).toBe(true);
+  });
+
+  test("falls back to an explicit vertical flag", () => {
+    expect(matchesVideoAspect(null, null, "9:16", true)).toBe(true);
+    expect(matchesVideoAspect(null, null, "9:16", false)).toBe(false);
+  });
+
+  test("skips assets whose orientation cannot be established", () => {
+    expect(matchesVideoAspect(null, null, "9:16")).toBe(false);
+    expect(matchesVideoAspect("abc", "def", "16:9")).toBe(false);
+  });
+});
+
+describe("filterMaterialsByAspect", () => {
+  const items = [
+    { provider: "pexels", url: "a", duration: 5, source_info: { rendition: { width: 1080, height: 1920 } } },
+    { provider: "pexels", url: "b", duration: 5, source_info: { rendition: { width: 1920, height: 1080 } } },
+    { provider: "pexels", url: "c", duration: 5, source_info: null },
+  ];
+
+  test("keeps only matching orientations", () => {
+    expect(filterMaterialsByAspect(items, "9:16").map((item) => item.url)).toEqual(["a"]);
+  });
+
+  test("passes everything through for square output", () => {
+    // Providers rarely have native 1:1 footage; cropping happens at render time.
+    expect(filterMaterialsByAspect(items, "1:1")).toHaveLength(3);
+  });
+});
+
+describe("safePublicUrl", () => {
+  test("strips query strings that may hold credentials", () => {
+    expect(safePublicUrl("https://example.com/v/1?token=secret")).toBe("https://example.com/v/1");
+  });
+
+  test("rejects credentials embedded in the URL", () => {
+    expect(safePublicUrl("https://user:pass@example.com/v")).toBeNull();
+  });
+
+  test("rejects non-http schemes and junk", () => {
+    expect(safePublicUrl("file:///etc/passwd")).toBeNull();
+    expect(safePublicUrl("not a url")).toBeNull();
+    expect(safePublicUrl(null)).toBeNull();
+  });
+});
+
+describe("materialSourceRecord", () => {
+  test("keeps only allow-listed public fields", () => {
+    const record = materialSourceRecord(
+      {
+        provider: "pexels",
+        url: "https://cdn.example.com/signed?sig=abc",
+        duration: 12.7,
+        source_info: {
+          provider: "pexels",
+          search_term: " nature ",
+          asset_id: 42 as unknown as string,
+          source_page: "https://www.pexels.com/video/42?utm=x",
+          creator: { id: "7", name: "Ada" },
+          rendition: { id: "hd", width: 1080, height: 1920 },
+        },
+      },
+      "/host/private/path/vid-abc.mp4",
+    );
+
+    // The signed download URL and the host path must never be persisted.
+    expect(record.local_file).toBe("vid-abc.mp4");
+    expect(JSON.stringify(record)).not.toContain("/host/private");
+    expect(JSON.stringify(record)).not.toContain("sig=abc");
+    expect(record.source_page).toBe("https://www.pexels.com/video/42");
+    expect(record.search_term).toBe("nature");
+    expect(record.duration).toBe(12);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("llm helpers", () => {
+  test("strips a markdown code fence", () => {
+    expect(stripCodeFence('```json\n["a","b"]\n```')).toBe('["a","b"]');
+    expect(stripCodeFence('["a"]')).toBe('["a"]');
+  });
+
+  test("recovers JSON wrapped in prose", () => {
+    expect(extractJson<string[]>('Here you go: ["a","b"] hope that helps', "[")).toEqual(["a", "b"]);
+    expect(extractJson<{ a: number }>('{"a":1}', "{")).toEqual({ a: 1 });
+    expect(extractJson("no json here", "[")).toBeNull();
+  });
+
+  test("cleans markup the TTS engine would read aloud", () => {
+    expect(formatScriptResponse("**Bold** and #heading and [stage] and (aside)")).toBe(
+      "Bold and heading and  and",
+    );
+  });
+
+  test("preserves paragraph breaks", () => {
+    // The Python version stripped newlines, which silently defeated
+    // paragraph_number by collapsing every script into one paragraph.
+    expect(formatScriptResponse("First para.\n\nSecond para.")).toBe("First para.\n\nSecond para.");
+  });
+
+  test("normalises hashtags", () => {
+    expect(normalizeHashtags(["du lich", "#Travel", "travel", ""], 5)).toEqual(["#dulich", "#Travel"]);
+    expect(normalizeHashtags("one two", 1)).toEqual(["#one"]);
+    expect(normalizeHashtags(null, 3)).toEqual([]);
+  });
+
+  test("produces usable fallback metadata", () => {
+    const metadata = fallbackSocialMetadata("A day in Shanghai", "Some script.", "tiktok");
+    expect(metadata.title).toBe("A day in Shanghai");
+    expect(metadata.hashtags).toHaveLength(5);
+  });
+
+  test("always includes the run context in the prompt", () => {
+    // Overriding the system prompt must not drop the subject or paragraph count.
+    const prompt = buildScriptPrompt({
+      videoSubject: "Bees",
+      paragraphNumber: 3,
+      customSystemPrompt: "CUSTOM RULES",
+    });
+    expect(prompt).toContain("CUSTOM RULES");
+    expect(prompt).toContain("video subject: Bees");
+    expect(prompt).toContain("number of paragraphs: 3");
+  });
+
+  test("clamps an out-of-range paragraph count", () => {
+    expect(buildScriptPrompt({ videoSubject: "x", paragraphNumber: 99 })).toContain("number of paragraphs: 10");
+    expect(buildScriptPrompt({ videoSubject: "x", paragraphNumber: 0 })).toContain("number of paragraphs: 1");
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("task ownership", () => {
+  test("parses the owner stamp", () => {
+    expect(parseOwner("host:1234:abcd")).toEqual({ hostname: "host", pid: 1234 });
+    expect(parseOwner("garbage")).toBeNull();
+    expect(parseOwner(null)).toBeNull();
+  });
+
+  test("treats another host as alive", () => {
+    // Deleting files a live node is still reading is the worse failure.
+    expect(isOwnerAlive("some-other-host:999999:abcd")).toBe(true);
+  });
+
+  test("treats this process's own stamp as dead", () => {
+    // Live work is tracked in memory, so a record reaching this check is stale.
+    expect(isOwnerAlive(PROCESS_OWNER_ID)).toBe(false);
+  });
+
+  test("treats an unknown owner as dead", () => {
+    expect(isOwnerAlive(null)).toBe(false);
+    expect(isOwnerAlive("")).toBe(false);
+  });
+});

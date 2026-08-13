@@ -7,78 +7,74 @@ on:
       - main
 
 jobs:
-  tests:
-    name: Python ${{ matrix.python-version }} tests
+  server:
+    name: Server (Bun)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.13"]
+    timeout-minutes: 20
 
     services:
-      redis:
-        image: redis:7-alpine
+      mongo:
+        image: mongo:7
         ports:
-          - 6379:6379
+          - 27017:27017
         options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
           --health-retries 10
 
     env:
-      MPT_TEST_REDIS_HOST: 127.0.0.1
-      MPT_TEST_REDIS_PORT: 6379
-      MPT_TEST_REDIS_DB: 15
+      MONGODB_URI: mongodb://127.0.0.1:27017
+      MONGODB_DB: moneyprinterturbo_ci
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
         with:
-          python-version: ${{ matrix.python-version }}
+          bun-version: latest
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
+      # The subtitle renderer measures text with the bundled fonts and the whole
+      # pipeline shells out to ffmpeg, so both must be present for the tests.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fontconfig
 
       - name: Install dependencies
-        run: uv sync --frozen --python ${{ matrix.python-version }}
+        run: bun install --frozen-lockfile
 
-      - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test
+      - name: Typecheck
+        run: bun run typecheck
 
-      - name: Lint Python sources
-        if: matrix.python-version == '3.11'
-        run: uv run --no-sync ruff check app cli.py main.py webui test
+      - name: Run tests
+        run: bun run --cwd server test
 
-      - name: Run unit tests with coverage
-        # pytest 兼容现有 unittest.TestCase，同时会收集仓库中的 pytest 风格
-        # 测试，避免测试文件已存在但 CI 没有真正执行。
-        run: uv run --no-sync python -X utf8 -m coverage run -m pytest -q test
+      - name: Build web UI
+        run: bun run build
 
-      - name: Report test coverage
-        run: uv run --no-sync python -m coverage report
+      - name: Verify the server boots
+        run: |
+          bun server/src/index.ts &
+          SERVER_PID=$!
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/v1/health >/dev/null 2>&1; then
+              curl -fsS http://127.0.0.1:8080/api/v1/health
+              kill $SERVER_PID
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy in time"
+          kill $SERVER_PID 2>/dev/null || true
+          exit 1
 
-      - name: Export coverage report
-        run: uv run --no-sync python -m coverage xml
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-python-${{ matrix.python-version }}
-          path: coverage.xml
-          retention-days: 7
-
-  windows-smoke:
-    name: Windows smoke tests
-    runs-on: windows-latest
-    timeout-minutes: 30
+  python-version:
+    name: Python version (archived)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Check out repository
@@ -89,23 +85,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --frozen --python 3.11
-
-      - name: Compile Python sources
-        run: uv run --no-sync python -m compileall app cli.py main.py webui test
-
-      - name: Run core service smoke tests
-        run: >-
-          uv run --no-sync python -X utf8 -m pytest -q
-          test/services/test_config.py
-          test/services/test_state.py
-          test/services/test_task.py
-          test/services/test_task_manager.py
-          test/services/test_upload_post.py
-          test/services/test_controller_video.py
+      # The archived implementation is no longer tested end to end; this only
+      # confirms it still parses, so it stays usable as a reference.
+      - name: Compile archived sources
+        working-directory: python-version
+        run: python -m compileall -q app cli.py main.py webui

@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+/*
+ * Theme tokens.
+ *
+ * Defined on bare :root so light is the baseline, then overridden for the
+ * system dark preference and again for an explicit toggle, so neither can
+ * strand a colour undefined.
+ */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --border: #e2e5e9;
+  --text: #14171a;
+  --text-muted: #667085;
+  --accent: #2f6fed;
+  --accent-fg: #ffffff;
+  --danger: #d64545;
+  --success: #2c9c5f;
+  --warning: #c98a1b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1116;
+    --surface: #161a21;
+    --surface-2: #1d222b;
+    --border: #2a3039;
+    --text: #e6e9ef;
+    --text-muted: #98a2b3;
+    --accent: #5b8def;
+    --accent-fg: #0b0e13;
+    --danger: #f2726f;
+    --success: #4ec98a;
+    --warning: #e0ad48;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0e1116;
+  --surface: #161a21;
+  --surface-2: #1d222b;
+  --border: #2a3039;
+  --text: #e6e9ef;
+  --text-muted: #98a2b3;
+  --accent: #5b8def;
+  --accent-fg: #0b0e13;
+  --danger: #f2726f;
+  --success: #4ec98a;
+  --warning: #e0ad48;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Wide content scrolls inside its own container, never the page body. */
+.scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+}

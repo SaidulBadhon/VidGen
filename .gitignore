@@ -1,44 +1,46 @@
 .DS_Store
-/config.toml
-/config.toml.bak
-/storage/
-/.idea/
-/app/services/__pycache__
-/app/__pycache__/
-/app/config/__pycache__/
-/app/models/__pycache__/
-/app/utils/__pycache__/
-/*/__pycache__/*
+.idea/
 .vscode
-/**/.streamlit
-__pycache__
-logs/
 
-node_modules
-# VuePress 默认临时文件目录
-/sites/docs/.vuepress/.temp
-# VuePress 默认缓存目录
-/sites/docs/.vuepress/.cache
-# VuePress 默认构建生成的静态文件目录
-/sites/docs/.vuepress/dist
-# 模型目录
+# Runtime data
+/storage/
 /models/
-./models/*
+logs/
+*.log
 
+# Node / Bun
+node_modules
+dist
+.vite
+bun.lock
+bun.lockb
+*.tsbuildinfo
+
+# Env
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# python-version/ (archived Python implementation)
+# ---------------------------------------------------------------------------
+/python-version/config.toml
+/python-version/config.toml.bak
+__pycache__/
+*.py[cod]
 venv/
 .venv
-
-# Debug and test files
-CLAUDE.md
-debug/
-debug_*.py
-test_*.py
-!test/services/test_*.py
-!test/test_*.py
-streamlit.log
+.pytest_cache/
+.ruff_cache/
 .coverage
 coverage.xml
 htmlcov/
+/python-version/**/.streamlit
+streamlit.log
+
+# Local agent/tooling scratch
+CLAUDE.md
+debug/
 .codegraph
-/docs/superpowers
 .understand-anything
+/docs/superpowers

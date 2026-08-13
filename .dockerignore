@@ -1,30 +1,26 @@
-# Exclude common Python files and directories
-venv/
-.venv/
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.pyz
-*.pyw
-*.pyi
-*.egg-info/
+# Version control
+.git/
+.github/
 
-# Exclude development and local files
+# The archived Python implementation is not part of the new image
+python-version/
+
+# Node / Bun
+node_modules/
+**/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Runtime data — mounted as volumes instead
+storage/
+models/
+logs/
+*.log
+
+# Local env and editor state
 .env
 .env.*
-*.log
-*.db
+!.env.example
 .DS_Store
-.pytest_cache/
-.ruff_cache/
 .idea/
-logs/
-
-# Exclude version control system files
-.git/
-.gitignore
-.svn/
-
-storage/
-config.toml
+.vscode/

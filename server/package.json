@@ -1,0 +1,29 @@
+{
+  "name": "@moneyprinterturbo/server",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "cli": "bun src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@ai-sdk/openai-compatible": "^1.0.0",
+    "@napi-rs/canvas": "^0.1.60",
+    "ai": "^5.0.0",
+    "hono": "^4.6.0",
+    "microsoft-cognitiveservices-speech-sdk": "^1.41.0",
+    "mongodb": "^6.10.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
