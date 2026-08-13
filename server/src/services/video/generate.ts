@@ -4,14 +4,19 @@
  */
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { rename } from "node:fs/promises";
+import { basename, extname, join } from "node:path";
 import { codecQualityArgs, encodeWithCodecFallback, getConfiguredVideoCodec } from "./codec.ts";
 import { num, runFfmpeg, type RunOptions } from "./ffmpeg.ts";
 import { probe } from "./probe.ts";
 import { OUTPUT_FPS } from "./clip.ts";
 import { deleteFiles } from "./concat.ts";
+import { supportsAssBurn } from "./capabilities.ts";
+import { buildSubtitlesFilter } from "./still.ts";
+import { muxSoftSubtitles } from "./softSubs.ts";
 import { renderCueImage, resolveBackgroundColor, type SubtitleStyle } from "./textRender.ts";
 import { readSrtFile, type SubtitleCue } from "../subtitle/srt.ts";
+import { assRenderOptionsFromParams, writeAssFile } from "../subtitle/ass.ts";
 import { shouldUseBgm } from "../bgm.ts";
 import { logger, errorMessage } from "../../utils/logger.ts";
 import { fontDir } from "../../utils/paths.ts";
@@ -35,7 +40,70 @@ const BGM_FADE_OUT_SECONDS = 3;
  * defaults to a 256-descriptor limit. Longer videos are composited in several
  * passes instead of risking an EMFILE failure at the very last stage.
  */
-const MAX_OVERLAY_INPUTS = 64;
+export const MAX_OVERLAY_INPUTS = 64;
+
+// ---------------------------------------------------------------------------
+// Subtitle strategy
+// ---------------------------------------------------------------------------
+
+/** What the caller asked for; unset lets the cue count decide. */
+export type SubtitleRenderMode = "burn" | "soft" | "none";
+
+/** How captions are actually put on screen for this render. */
+export type SubtitleStrategy = "overlay" | "ass" | "soft" | "none";
+
+/** Burn-in was asked for but this ffmpeg has no libass, so captions are soft. */
+export const SUBTITLE_BURN_UNAVAILABLE_WARNING = "subtitle_burn_unavailable";
+
+/** Captions were produced but could not be embedded; the video is still fine. */
+export const SUBTITLE_SOFT_MUX_FAILED_WARNING = "subtitle_soft_mux_failed";
+
+export interface SubtitleStrategyInput {
+  cueCount: number;
+  requested?: SubtitleRenderMode | null;
+  /** Result of supportsAssBurn(); only consulted for a burn request. */
+  assAvailable: boolean;
+}
+
+interface StrategyDecision {
+  strategy: SubtitleStrategy;
+  warningCode: string | null;
+}
+
+function decideSubtitleStrategy(input: SubtitleStrategyInput): StrategyDecision {
+  const { cueCount, requested, assAvailable } = input;
+  const longForm = cueCount > MAX_OVERLAY_INPUTS;
+
+  if (requested === "none") return { strategy: "none", warningCode: null };
+  if (requested === "soft") return { strategy: "soft", warningCode: null };
+
+  if (requested === "burn") {
+    if (assAvailable) return { strategy: "ass", warningCode: null };
+    // The overlay path still burns captions correctly, it just cannot do so
+    // for long content without re-encoding the whole video once per batch.
+    if (longForm) return { strategy: "soft", warningCode: SUBTITLE_BURN_UNAVAILABLE_WARNING };
+    return { strategy: "overlay", warningCode: null };
+  }
+
+  // Unspecified: shorts keep the pixel-exact overlay renderer they have always
+  // used, long content takes the single-pass route.
+  return { strategy: longForm ? "soft" : "overlay", warningCode: null };
+}
+
+/** Picks the caption pipeline for a render. */
+export function resolveSubtitleStrategy(input: SubtitleStrategyInput): SubtitleStrategy {
+  return decideSubtitleStrategy(input).strategy;
+}
+
+/**
+ * Degradation the task layer should report, or null.
+ *
+ * Returned as a bare code because `TaskWarning` also carries the video index,
+ * which only the pipeline loop knows.
+ */
+export function subtitleStrategyWarningCode(input: SubtitleStrategyInput): string | null {
+  return decideSubtitleStrategy(input).warningCode;
+}
 
 export interface GenerateVideoOptions {
   videoPath: string;
@@ -51,6 +119,11 @@ export interface GenerateVideoOptions {
   bgmFileOverride?: string;
   /** Resolved local background music when no override applies. */
   bgmFile?: string;
+  /**
+   * Caption pipeline override. Left unset, shorts render exactly as before and
+   * long-form falls back to a soft track instead of multi-pass compositing.
+   */
+  subtitleRenderMode?: SubtitleRenderMode | null;
   signal?: AbortSignal;
 }
 
@@ -62,6 +135,10 @@ export interface GenerateVideoResult {
    * layer can surface a degradation warning instead of failing the whole run.
    */
   bgmMixSucceeded: boolean;
+  /** Which caption pipeline ran, for logging and diagnostics. */
+  subtitleStrategy: SubtitleStrategy;
+  /** Warning codes for the task layer to pair with a video index. */
+  warningCodes: string[];
 }
 
 export interface CueOverlay {
@@ -183,14 +260,54 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
   const outputAudioRate = audioInfo.audioSampleRate || 44100;
 
   // --- Subtitles -----------------------------------------------------------
-  let overlays: CueOverlay[] = [];
-  if (params.subtitle_enabled && subtitlePath && existsSync(subtitlePath)) {
+  const subtitlesRequested = Boolean(params.subtitle_enabled && subtitlePath && existsSync(subtitlePath));
+  let cues: SubtitleCue[] = [];
+  if (subtitlesRequested) {
     const fontName = params.font_name || "MicrosoftYaHeiBold.ttc";
     logger.info(`  ⑤ font: ${join(fontDir(), fontName)}`);
-    const cues = await readSrtFile(subtitlePath);
+    cues = await readSrtFile(subtitlePath);
+  }
+
+  const strategyInput: SubtitleStrategyInput = {
+    cueCount: cues.length,
+    requested: options.subtitleRenderMode ?? null,
+    // Only a burn request depends on libass, so no other render pays for the
+    // probe — which keeps the short-video path free of an extra spawn.
+    assAvailable: options.subtitleRenderMode === "burn" ? await supportsAssBurn() : false,
+  };
+  const strategy = subtitlesRequested ? resolveSubtitleStrategy(strategyInput) : "none";
+  const warningCodes: string[] = [];
+
+  const strategyWarning = subtitlesRequested ? subtitleStrategyWarningCode(strategyInput) : null;
+  if (strategyWarning) {
+    warningCodes.push(strategyWarning);
+    logger.warning(
+      `burned-in subtitles were requested but this ffmpeg has no libass ` +
+        `(no "subtitles" filter); ${cues.length} cues will be muxed as a soft track instead`,
+    );
+  }
+
+  let overlays: CueOverlay[] = [];
+  let assPath: string | undefined;
+
+  if (strategy === "overlay") {
     overlays = await buildCueOverlays(cues, params, outputDir);
     logger.info(`rendered ${overlays.length} subtitle cues`);
+  } else if (strategy === "ass") {
+    assPath = join(outputDir, `${basename(outputFile, extname(outputFile))}.ass`);
+    await writeAssFile(assPath, cues, assRenderOptionsFromParams(params));
+    logger.info(`burning ${cues.length} subtitle cues with libass: ${assPath}`);
+  } else if (strategy === "soft") {
+    logger.info(`muxing ${cues.length} subtitle cues as a soft subtitle track`);
   }
+
+  // A soft track is added by remuxing the finished picture, so the composite
+  // writes to a scratch file and the mux produces the real output.
+  const softIntermediate =
+    strategy === "soft"
+      ? join(outputDir, `${basename(outputFile, extname(outputFile))}-nosubs${extname(outputFile) || ".mp4"}`)
+      : "";
+  const composeTarget = softIntermediate || outputFile;
 
   // --- Background music ----------------------------------------------------
   const bgmEnabled = shouldUseBgm(params.bgm_type, params.bgm_volume);
@@ -209,15 +326,15 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
   const shouldLoopBgm = bgmFileOverride === undefined;
 
   let bgmMixSucceeded = true;
-  let result: GenerateVideoResult;
 
   try {
-    result = await encodeInPasses({
+    await encodeInPasses({
       videoPath,
       audioPath,
-      outputFile,
+      outputFile: composeTarget,
       outputDir,
       overlays,
+      assPath,
       params,
       videoDuration,
       outputAudioRate,
@@ -236,12 +353,13 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
       error,
     );
     bgmMixSucceeded = false;
-    result = await encodeInPasses({
+    await encodeInPasses({
       videoPath,
       audioPath,
-      outputFile,
+      outputFile: composeTarget,
       outputDir,
       overlays,
+      assPath,
       params,
       videoDuration,
       outputAudioRate,
@@ -250,10 +368,29 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
       signal,
     });
   } finally {
-    await deleteFiles(overlays.map((overlay) => overlay.imagePath));
+    await deleteFiles([...overlays.map((overlay) => overlay.imagePath), ...(assPath ? [assPath] : [])]);
   }
 
-  return { ...result, bgmMixSucceeded };
+  if (softIntermediate) {
+    try {
+      await muxSoftSubtitles({
+        videoPath: softIntermediate,
+        subtitlePath,
+        outputFile,
+        language: params.video_language,
+        signal,
+      });
+      await deleteFiles([softIntermediate]);
+    } catch (error) {
+      // The picture and narration are already encoded; losing a whole long-form
+      // render over a remux would be far worse than shipping it uncaptioned.
+      logger.exception(`failed to mux soft subtitles into ${outputFile}`, error);
+      warningCodes.push(SUBTITLE_SOFT_MUX_FAILED_WARNING);
+      await rename(softIntermediate, outputFile);
+    }
+  }
+
+  return { outputFile, bgmMixSucceeded, subtitleStrategy: strategy, warningCodes };
 }
 
 interface EncodeOptions {
@@ -262,6 +399,8 @@ interface EncodeOptions {
   outputFile: string;
   outputDir: string;
   overlays: CueOverlay[];
+  /** ASS file burned in by libass, used instead of PNG overlays. */
+  assPath?: string;
   params: VideoParams;
   videoDuration: number;
   outputAudioRate: number;
@@ -274,7 +413,7 @@ interface EncodeOptions {
  * Runs the composite, splitting the subtitle overlays across passes when there
  * are more cues than we are willing to open at once.
  */
-async function encodeInPasses(options: EncodeOptions): Promise<GenerateVideoResult> {
+async function encodeInPasses(options: EncodeOptions): Promise<void> {
   const { overlays, outputDir, outputFile } = options;
 
   if (overlays.length <= MAX_OVERLAY_INPUTS) {
@@ -285,7 +424,7 @@ async function encodeInPasses(options: EncodeOptions): Promise<GenerateVideoResu
       sourceVideo: options.videoPath,
       target: outputFile,
     });
-    return { outputFile, bgmMixSucceeded: true };
+    return;
   }
 
   logger.info(
@@ -322,8 +461,6 @@ async function encodeInPasses(options: EncodeOptions): Promise<GenerateVideoResu
   } finally {
     await deleteFiles(intermediates);
   }
-
-  return { outputFile, bgmMixSucceeded: true };
 }
 
 /**
@@ -340,6 +477,7 @@ async function encodeOnce(
     audioPath,
     target,
     overlays,
+    assPath,
     params,
     videoDuration,
     outputAudioRate,
@@ -375,11 +513,19 @@ async function encodeOnce(
   }
 
   const chains: string[] = [];
-  const { chains: overlayChains, outputLabel: videoLabel } = buildOverlayChain(
-    overlays,
-    firstOverlayInput,
-  );
+  const { chains: overlayChains, outputLabel } = buildOverlayChain(overlays, firstOverlayInput);
   chains.push(...overlayChains);
+
+  let videoLabel = outputLabel;
+  let videoIsFiltered = overlays.length > 0;
+
+  // libass reads every cue from one file, so burning in adds a single filter to
+  // the graph that is already being built rather than a pass of its own.
+  if (assPath) {
+    chains.push(`[${videoLabel}]${buildSubtitlesFilter(assPath, fontDir())}[assv]`);
+    videoLabel = "assv";
+    videoIsFiltered = true;
+  }
 
   let audioLabel = "";
   if (isFinalPass) {
@@ -406,7 +552,7 @@ async function encodeOnce(
   const mapArgs: string[] = [];
   if (chains.length > 0) {
     mapArgs.push("-filter_complex", chains.join(";"));
-    mapArgs.push("-map", overlays.length > 0 ? `[${videoLabel}]` : "0:v");
+    mapArgs.push("-map", videoIsFiltered ? `[${videoLabel}]` : "0:v");
     if (audioLabel) mapArgs.push("-map", `[${audioLabel}]`);
   } else {
     mapArgs.push("-map", "0:v");

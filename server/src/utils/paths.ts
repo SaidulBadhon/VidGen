@@ -43,6 +43,18 @@ export function taskDir(subDir = ""): string {
   return ensure(subDir ? join(base, subDir) : base);
 }
 
+/**
+ * Book storage directory, mirroring `taskDir()`.
+ *
+ * A book's extracted structure is far too large for a Mongo document, so it
+ * lives here as `<bookId>/structure.json` alongside the cover image, and the
+ * database keeps only pointers to it.
+ */
+export function booksDir(subDir = ""): string {
+  const base = join(storageDir(), "books");
+  return ensure(subDir ? join(base, subDir) : base);
+}
+
 export function fontDir(subDir = ""): string {
   const base = resourceDir("fonts");
   return ensure(subDir ? join(base, subDir) : base);

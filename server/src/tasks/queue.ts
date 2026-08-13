@@ -22,7 +22,8 @@ interface QueuedTask {
   run: () => Promise<unknown>;
 }
 
-class TaskQueue {
+/** Exported for tests; application code uses the `taskQueue` singleton below. */
+export class TaskQueue {
   private running = 0;
   private readonly pending: QueuedTask[] = [];
   private readonly controllers = new Map<string, AbortController>();
@@ -86,17 +87,27 @@ class TaskQueue {
     }
   }
 
-  /** Requests cancellation of a running or queued task. */
+  /**
+   * Requests cancellation of a running or queued task.
+   *
+   * The pending list is checked first because `add` registers a controller for
+   * queued tasks too. Aborting the signal alone would report success while
+   * leaving the entry queued, and it would still start later on an already
+   * aborted signal — script generation does not take the signal, so a cancelled
+   * task would burn LLM quota before failing. Dropping it from the backlog is
+   * the only cancellation that actually cancels.
+   */
   cancel(taskId: string): boolean {
-    const controller = this.controllers.get(taskId);
-    if (controller) {
-      controller.abort(new Error("task was cancelled"));
-      return true;
-    }
-
     const index = this.pending.findIndex((entry) => entry.taskId === taskId);
     if (index >= 0) {
       this.pending.splice(index, 1);
+      this.controllers.delete(taskId);
+      return true;
+    }
+
+    const controller = this.controllers.get(taskId);
+    if (controller) {
+      controller.abort(new Error("task was cancelled"));
       return true;
     }
     return false;

@@ -16,6 +16,7 @@ import { connect, disconnect } from "./db/client.ts";
 import { initSettings } from "./config/settings.ts";
 import { handleError } from "./http/errors.ts";
 import { serveSpa, serveTaskFile } from "./http/staticFiles.ts";
+import { bookRouter } from "./routes/v1/book.ts";
 import { llmRouter } from "./routes/v1/llm.ts";
 import { mediaRouter } from "./routes/v1/media.ts";
 import { pingRouter } from "./routes/v1/ping.ts";
@@ -41,7 +42,9 @@ app.use(
   "/api/*",
   cors({
     origin: corsOrigins.length > 0 ? corsOrigins : "*",
-    allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    // PATCH is what the book review endpoints use; without it the browser's
+    // preflight fails before the request is ever made.
+    allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowHeaders: ["Content-Type", "Authorization", "x-request-id"],
     credentials: corsOrigins.length > 0,
   }),
@@ -61,6 +64,7 @@ app.route("/api/v1", settingsRouter);
 app.route("/api/v1", llmRouter);
 app.route("/api/v1", mediaRouter);
 app.route("/api/v1", videoRouter);
+app.route("/api/v1", bookRouter);
 
 // Generated media: final videos, narration audio, subtitles, script.json.
 app.get("/tasks/*", (c) => serveTaskFile(c, c.req.path.replace(/^\/tasks\/?/, "")));
@@ -114,4 +118,8 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-export default app;
+// Deliberately no default export. Bun auto-serves a default export that looks
+// like a server, so exporting `app` here started a second, unconfigured server
+// on port 3000 alongside the explicit `Bun.serve` above — silently reachable
+// when that port was free, and a hard EADDRINUSE crash at startup when it was
+// not. This module is only ever an entrypoint; nothing imports from it.

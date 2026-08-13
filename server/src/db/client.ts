@@ -8,7 +8,14 @@
 
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { logger } from "../utils/logger.ts";
-import type { MaterialCacheDocument, SettingsDocument, TaskDocument } from "./types.ts";
+import type {
+  BookDecisionDocument,
+  BookDocument,
+  BookSegmentDocument,
+  MaterialCacheDocument,
+  SettingsDocument,
+  TaskDocument,
+} from "./types.ts";
 
 const MONGODB_URI = process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017";
 const MONGODB_DB = process.env.MONGODB_DB ?? "vidgen";
@@ -30,6 +37,20 @@ async function createIndexes(database: Db): Promise<void> {
   await database.collection<MaterialCacheDocument>("material_cache").createIndexes([
     { key: { expires_at: 1 }, name: "expires_at_ttl", expireAfterSeconds: 0 },
     { key: { provider: 1, search_term: 1 }, name: "provider_search_term" },
+  ]);
+
+  // Books list newest first like tasks; their children are always read as a
+  // whole book, so one compound index per collection covers every query.
+  await database.collection<BookDocument>("books").createIndexes([
+    { key: { created_at: -1 }, name: "created_at_desc" },
+  ]);
+
+  await database.collection<BookSegmentDocument>("book_segments").createIndexes([
+    { key: { book_id: 1, index: 1 }, name: "book_id_index" },
+  ]);
+
+  await database.collection<BookDecisionDocument>("book_decisions").createIndexes([
+    { key: { book_id: 1 }, name: "book_id" },
   ]);
 }
 
@@ -88,6 +109,18 @@ export function tasksCollection(): Collection<TaskDocument> {
 
 export function materialCacheCollection(): Collection<MaterialCacheDocument> {
   return requireDb().collection<MaterialCacheDocument>("material_cache");
+}
+
+export function booksCollection(): Collection<BookDocument> {
+  return requireDb().collection<BookDocument>("books");
+}
+
+export function bookSegmentsCollection(): Collection<BookSegmentDocument> {
+  return requireDb().collection<BookSegmentDocument>("book_segments");
+}
+
+export function bookDecisionsCollection(): Collection<BookDecisionDocument> {
+  return requireDb().collection<BookDecisionDocument>("book_decisions");
 }
 
 export function isConnected(): boolean {

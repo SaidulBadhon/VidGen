@@ -8,9 +8,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, ChevronUp, Loader2, Sparkles, Upload, Wand2 } from "lucide-react";
+import { BookOpen, ChevronDown, ChevronUp, Clapperboard, Loader2, Sparkles, Upload, Wand2 } from "lucide-react";
 import { api, subscribeToTask, type Task } from "./api/client.ts";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES, useI18n } from "./i18n/index.tsx";
+import { BookScreen } from "./book/BookScreen.tsx";
 import { BgmPreview, VoicePreview } from "./components/AudioPreview.tsx";
 import { SettingsPanel } from "./components/SettingsPanel.tsx";
 import { TaskManager } from "./components/TaskManager.tsx";
@@ -83,6 +84,8 @@ export default function App() {
   const queryClient = useQueryClient();
 
   const [params, setParams] = useState<Record<string, unknown>>({ ...DEFAULT_PARAMS });
+  /** Which tool the app is showing; settings and language stay shared. */
+  const [mode, setMode] = useState<"video" | "book">("video");
   const [showSettings, setShowSettings] = useState(false);
   const [ttsServer, setTtsServer] = useState("azure-tts-v1");
   const [activeTask, setActiveTask] = useState<Task | null>(null);
@@ -194,7 +197,28 @@ export default function App() {
           {health.data && health.data.ffmpeg !== "ok" && <Badge tone="danger">ffmpeg missing</Badge>}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1 rounded-lg border border-border bg-surface-2 p-1">
+            <Button
+              size="sm"
+              variant={mode === "video" ? "primary" : "ghost"}
+              aria-pressed={mode === "video"}
+              onClick={() => setMode("video")}
+            >
+              <Clapperboard size={14} />
+              {t("Mode Short Video")}
+            </Button>
+            <Button
+              size="sm"
+              variant={mode === "book" ? "primary" : "ghost"}
+              aria-pressed={mode === "book"}
+              onClick={() => setMode("book")}
+            >
+              <BookOpen size={14} />
+              {t("Mode Audiobook")}
+            </Button>
+          </div>
+
           <div className="w-40">
             <Select
               value={language}
@@ -215,6 +239,11 @@ export default function App() {
         </div>
       )}
 
+      {mode === "book" && <BookScreen />}
+
+      {/* The short-video tool below is unchanged; only its visibility is gated. */}
+      {mode === "video" && (
+      <>
       <div className="grid gap-4 lg:grid-cols-3">
         {/* ---------------------------------------------------------------- */}
         <Card title={t("Video Script Settings")}>
@@ -765,6 +794,8 @@ export default function App() {
           }}
         />
       </div>
+      </>
+      )}
     </div>
   );
 }
