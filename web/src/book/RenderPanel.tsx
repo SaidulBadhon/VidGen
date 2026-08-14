@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Image as ImageIcon, Loader2, Play, Upload } from "lucide-react";
+import { Image as ImageIcon, Loader2, Play, RotateCw, Upload } from "lucide-react";
 import { api } from "../api/client.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Alert, Badge, Button, Card, Field, NumberInput, Progress, Select, Slider } from "../components/ui.tsx";
@@ -22,6 +22,7 @@ import {
   isRenderConflict,
   type BookDetail,
   type BookEvent,
+  type BookLogLine,
   type BookRenderRequest,
   type SubtitleRenderMode,
 } from "./api.ts";
@@ -107,6 +108,17 @@ export function RenderPanel({
       if (!body.font_name) delete body.font_name;
       return bookApi.render(bookId, body);
     },
+    onSuccess: () => {
+      onRenderStarted();
+      queryClient.invalidateQueries({ queryKey: ["book", bookId] });
+    },
+  });
+
+  // A retry reuses the settings stored on the book, which is what the endpoint
+  // falls back to with no body — so one failed chapter does not mean re-picking
+  // a voice for the other sixty-three.
+  const retrySegment = useMutation({
+    mutationFn: (index: number) => bookApi.renderSegment(bookId, index),
     onSuccess: () => {
       onRenderStarted();
       queryClient.invalidateQueries({ queryKey: ["book", bookId] });
@@ -363,16 +375,82 @@ export function RenderPanel({
 
             {failed.length > 0 && (
               <div className="space-y-1.5">
+                <p className="text-xs font-medium text-danger">
+                  {t("Book Segments Failed", { count: failed.length })}
+                </p>
                 {failed.map((segment) => (
-                  <Alert key={segment._id} tone="danger">
-                    #{segment.index + 1} {segment.title}: {segment.error ?? t("Task Status Failed")}
-                  </Alert>
+                  <div
+                    key={segment._id}
+                    className="flex flex-wrap items-start gap-3 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">
+                        #{segment.index + 1} {segment.title || t("Book Untitled Segment")}
+                      </p>
+                      <p className="text-xs text-muted">{segment.error ?? t("Task Status Failed")}</p>
+                    </div>
+                    <Button
+                      size="sm"
+                      title={t("Book Retry Segment")}
+                      disabled={retrySegment.isPending || !detail?.book.render_params}
+                      onClick={() => retrySegment.mutate(segment.index)}
+                    >
+                      {retrySegment.isPending ? (
+                        <Loader2 className="animate-spin" size={14} />
+                      ) : (
+                        <RotateCw size={14} />
+                      )}
+                      {t("Book Retry")}
+                    </Button>
+                  </div>
                 ))}
+                {!detail?.book.render_params && (
+                  <p className="text-xs text-muted">{t("Book Retry Needs Render")}</p>
+                )}
+                {retrySegment.isError && <Alert tone="danger">{errorText(retrySegment.error, t)}</Alert>}
               </div>
             )}
+
+            <ActivityFeed lines={progress?.recent_logs ?? []} />
           </div>
         </Card>
       )}
     </div>
+  );
+}
+
+/**
+ * The tail of what the render is saying about itself.
+ *
+ * A book render is hours long and until now said nothing while it ran: the task
+ * records filled up with "narrating chapter 12" and "chunk 40/57" and none of it
+ * reached a screen, so a working render and a stuck one looked identical. The
+ * lines are rendered exactly as the stream delivers them — the server sends a
+ * bounded window rather than a transcript, so nothing accumulates here either.
+ */
+function ActivityFeed({ lines }: { lines: BookLogLine[] }) {
+  const { t } = useI18n();
+  const scroller = useRef<HTMLPreElement>(null);
+
+  // Newest last means the interesting end is the bottom one.
+  useEffect(() => {
+    const element = scroller.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [lines]);
+
+  if (lines.length === 0) return null;
+
+  return (
+    <details open>
+      <summary className="cursor-pointer text-xs text-muted">{t("Book Activity")}</summary>
+      <pre
+        ref={scroller}
+        className="scroll-x mt-2 max-h-56 overflow-auto rounded-lg border border-border bg-surface-2 p-2 text-xs"
+      >
+        {lines
+          .map(({ segment, line }) => (segment < 0 ? line : `#${segment + 1} ${line}`))
+          .join("\n")}
+      </pre>
+    </details>
   );
 }

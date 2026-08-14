@@ -20,6 +20,7 @@
     "hono": "^4.6.0",
     "microsoft-cognitiveservices-speech-sdk": "^1.41.0",
     "mongodb": "^6.10.0",
+    "pdfjs-dist": "^6.2.108",
     "zod": "^3.25.0"
   },
   "devDependencies": {

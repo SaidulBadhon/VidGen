@@ -137,6 +137,10 @@ describe("bookSegmentOptionsSchema", () => {
     ).toThrow();
   });
 
+  test("accepts smart mode", () => {
+    expect(bookSegmentOptionsSchema.parse({ mode: "smart" }).mode).toBe("smart");
+  });
+
   test("rejects an unknown mode and out-of-range durations", () => {
     expect(() => bookSegmentOptionsSchema.parse({ mode: "paragraph" })).toThrow();
     expect(() => bookSegmentOptionsSchema.parse({ target_duration_seconds: 5 })).toThrow();
@@ -444,6 +448,14 @@ describe("segment narration", () => {
     );
   });
 
+  test("announces book, author, and chapter before the body when they are not already there", () => {
+    const structure = smallBook();
+    const blocks = segmentBlocks(structure, resolveBookDecisions(structure, []), ["0:2"]);
+    expect(segmentNarrationText(blocks, ["A Quiet Harbour", "R. Nyström", "Chapter One"])).toBe(
+      "A Quiet Harbour\n\nR. Nyström\n\nChapter One\n\nThe harbour was quiet that morning.",
+    );
+  });
+
   test("returns empty text when every block was filtered out", () => {
     const structure = smallBook();
     const decisions = resolveBookDecisions(structure, []);
@@ -452,10 +464,10 @@ describe("segment narration", () => {
 });
 
 describe("buildSegmentUpserts", () => {
-  test("plans unrendered segments stamped with the book revision", () => {
+  test("plans unrendered segments stamped with the book revision", async () => {
     const structure = smallBook();
     const decisions = resolveBookDecisions(structure, []);
-    const planned = buildSegmentUpserts("book-1", structure, decisions, DEFAULT_SEGMENT_OPTIONS, 7);
+    const planned = await buildSegmentUpserts("book-1", structure, decisions, DEFAULT_SEGMENT_OPTIONS, 7);
 
     expect(planned.length).toBeGreaterThan(0);
     for (const segment of planned) {
@@ -468,10 +480,10 @@ describe("buildSegmentUpserts", () => {
     expect(planned.map((segment) => segment.index)).toEqual(planned.map((_, index) => index));
   });
 
-  test("never plans a block the decisions dropped", () => {
+  test("never plans a block the decisions dropped", async () => {
     const structure = smallBook();
     const decisions = resolveBookDecisions(structure, []);
-    const planned = buildSegmentUpserts("book-1", structure, decisions, DEFAULT_SEGMENT_OPTIONS, 1);
+    const planned = await buildSegmentUpserts("book-1", structure, decisions, DEFAULT_SEGMENT_OPTIONS, 1);
 
     expect(planned.flatMap((segment) => segment.block_ids)).not.toContain("0:1");
   });

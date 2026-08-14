@@ -67,8 +67,15 @@ export const LLM_PROVIDER_REGISTRY: readonly LlmProviderSpec[] = [
     providerId: "gemma",
     defaultLabel: "Gemma (Ollama)",
     adapter: "openai-compatible",
-    apiKeyUrl: "https://ollama.com/library/gemma3",
-    defaultModel: "gemma3",
+    apiKeyUrl: "https://ollama.com/library/gemma4",
+    /**
+     * `e4b` is Gemma 4's nested "effective 4B" build: larger on disk than its
+     * active parameter count suggests, but the smallest of the three published
+     * variants to run. The tag is explicit because Ollama rejects a bare model
+     * name whose blobs are not fully pulled, and a versioned tag makes that
+     * failure legible instead of looking like a missing provider.
+     */
+    defaultModel: "gemma4:e4b",
     // Left empty so the environment-aware default in config/runtime.ts applies:
     // localhost on a host, host.docker.internal or the gateway in a container.
     defaultBaseUrl: "",

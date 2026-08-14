@@ -6,11 +6,11 @@
  * server would reject rather than round-tripping a 400.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Download, FileAudio, Film, Loader2, RotateCcw, Save } from "lucide-react";
+import { Download, FileAudio, Film, Loader2, RotateCcw, Save, Sparkles } from "lucide-react";
 import { useI18n } from "../i18n/index.tsx";
-import { Alert, Badge, Button, Card, Field, NumberInput, Select } from "../components/ui.tsx";
+import { Alert, Badge, Button, Card, Field, NumberInput, Select, buttonClass } from "../components/ui.tsx";
 import {
   MAX_SEGMENT_SECONDS,
   MAX_WORDS_PER_MINUTE,
@@ -20,6 +20,9 @@ import {
   errorText,
   formatDuration,
   isRenderConflict,
+  segmentDownloadName,
+  taskDownloadUrl,
+  SEGMENT_MODES,
   type BookDetail,
   type BookSegmentState,
   type SegmentMode,
@@ -111,10 +114,10 @@ export function SegmentsPanel({
                 <Select
                   value={options.mode}
                   onValueChange={(value) => set("mode", value as SegmentMode)}
-                  options={[
-                    { value: "chapter", label: t("Book Segment Mode chapter") },
-                    { value: "duration", label: t("Book Segment Mode duration") },
-                  ]}
+                  options={SEGMENT_MODES.map((mode) => ({
+                    value: mode,
+                    label: t(`Book Segment Mode ${mode}`),
+                  }))}
                   disabled={renderingActive}
                 />
               </Field>
@@ -182,8 +185,14 @@ export function SegmentsPanel({
                 disabled={!dirty || Boolean(problem) || apply.isPending || renderingActive}
                 onClick={() => options && apply.mutate(options)}
               >
-                {apply.isPending ? <Loader2 className="animate-spin" size={14} /> : <Save size={14} />}
-                {t("Book Apply Plan")}
+                {apply.isPending ? (
+                  <Loader2 className="animate-spin" size={14} />
+                ) : options.mode === "smart" ? (
+                  <Sparkles size={14} />
+                ) : (
+                  <Save size={14} />
+                )}
+                {t(options.mode === "smart" ? "Book Apply Plan Smart" : "Book Apply Plan")}
               </Button>
               <span className="text-xs text-muted">
                 {t("Book Plan Summary", {
@@ -241,25 +250,45 @@ export function SegmentsPanel({
                       <td className="py-2.5 align-middle">
                         <div className="flex items-center gap-1">
                           {segment.video_url && (
-                            <a href={segment.video_url} target="_blank" rel="noreferrer" className="inline-flex">
-                              <Button variant="ghost" size="sm" title={t("Book Open Video")}>
+                            <>
+                              <a
+                                href={segment.video_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={buttonClass({ variant: "ghost", size: "sm" })}
+                                title={t("Book Open Video")}
+                                aria-label={t("Book Open Video")}
+                              >
                                 <Film size={14} />
-                              </Button>
-                            </a>
+                              </a>
+                              <FileDownloadLink
+                                href={segment.video_url}
+                                title={segment.title || t("Book Untitled Segment")}
+                                label={t("Book Download Video")}
+                              >
+                                <Download size={14} />
+                                {t("Download")}
+                              </FileDownloadLink>
+                            </>
                           )}
                           {segment.audio_url && (
-                            <a href={segment.audio_url} target="_blank" rel="noreferrer" className="inline-flex">
-                              <Button variant="ghost" size="sm" title={t("Book Open Audio")}>
-                                <FileAudio size={14} />
-                              </Button>
-                            </a>
+                            <FileDownloadLink
+                              href={segment.audio_url}
+                              title={segment.title || t("Book Untitled Segment")}
+                              label={t("Book Download Audio")}
+                            >
+                              <FileAudio size={14} />
+                              {!segment.video_url && t("Download")}
+                            </FileDownloadLink>
                           )}
                           {segment.subtitle_url && (
-                            <a href={segment.subtitle_url} download className="inline-flex">
-                              <Button variant="ghost" size="sm" title={t("Book Download Subtitle")}>
-                                <Download size={14} />
-                              </Button>
-                            </a>
+                            <FileDownloadLink
+                              href={segment.subtitle_url}
+                              title={segment.title || t("Book Untitled Segment")}
+                              label={t("Book Download Subtitle")}
+                            >
+                              <Download size={14} />
+                            </FileDownloadLink>
                           )}
                           <Button
                             variant="ghost"
@@ -293,5 +322,29 @@ export function SegmentsPanel({
         )}
       </Card>
     </div>
+  );
+}
+
+function FileDownloadLink({
+  href,
+  title,
+  label,
+  children,
+}: {
+  href: string;
+  title: string;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <a
+      href={taskDownloadUrl(href)}
+      download={segmentDownloadName(title, href)}
+      className={buttonClass({ variant: "ghost", size: "sm" })}
+      title={label}
+      aria-label={label}
+    >
+      {children}
+    </a>
   );
 }

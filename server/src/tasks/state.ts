@@ -147,6 +147,28 @@ export async function getTaskLogs(taskId: string): Promise<string[]> {
 }
 
 /**
+ * The tail of several tasks' logs in one read.
+ *
+ * For a book the caller is polling on a timer and wants the last few lines of
+ * whatever is running right now, not the 500 each task retains. `$slice` does
+ * the trimming inside Mongo, so a book with a dozen active segments costs one
+ * query of a few kilobytes per tick rather than a dozen of half a megabyte.
+ */
+export async function getRecentTaskLogs(
+  taskIds: readonly string[],
+  linesPerTask: number,
+): Promise<Map<string, string[]>> {
+  const wanted = [...new Set(taskIds.filter(Boolean))];
+  if (wanted.length === 0 || linesPerTask < 1) return new Map();
+
+  const tasks = await tasksCollection()
+    .find({ _id: { $in: wanted } }, { projection: { logs: { $slice: -linesPerTask } } })
+    .toArray();
+
+  return new Map(tasks.map((task) => [task._id, task.logs ?? []]));
+}
+
+/**
  * Drops undefined fields so `$set` never overwrites a stored value with null.
  * Callers pass typed partials, hence the object rather than record parameter.
  */

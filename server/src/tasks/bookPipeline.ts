@@ -32,7 +32,7 @@ import { TASK_STATE_COMPLETE, TASK_STATE_FAILED, TASK_STATE_PROCESSING } from ".
 import { aspectToResolution, type VideoAspectValue } from "../models/schema.ts";
 import { videoParamsForBookRender } from "../models/bookSchema.ts";
 import { keptBlocks } from "../services/book/filter/decisions.ts";
-import { planSegments } from "../services/book/segment.ts";
+import { announcementLines, planBookSegments } from "../services/book/smartSegment.ts";
 import type { Block, BookStructure, FilterDecision, SegmentOptions } from "../services/book/types.ts";
 import { assRenderOptionsFromParams, writeAssFile } from "../services/subtitle/ass.ts";
 import { writeSrtFile } from "../services/subtitle/srt.ts";
@@ -43,7 +43,7 @@ import { registerSubtitleFont } from "../services/video/textRender.ts";
 import { synthesizeLongform } from "../services/voice/longform.ts";
 import { errorMessage, logger } from "../utils/logger.ts";
 import { getUuid } from "../utils/misc.ts";
-import { booksDir, fontDir, taskDir } from "../utils/paths.ts";
+import { booksDir, bookSegmentDir, bookSegmentFileStem, fontDir } from "../utils/paths.ts";
 import { PROCESS_OWNER_ID } from "./owner.ts";
 import { taskQueue } from "./queue.ts";
 import { appendTaskLog, createTask, updateTask } from "./state.ts";
@@ -160,15 +160,16 @@ export function shouldCommitSegmentResult(check: SegmentCommitCheck): boolean {
 // ---------------------------------------------------------------------------
 
 /** Turns a segment plan into the rows stored for a book, all unrendered. */
-export function buildSegmentUpserts(
+export async function buildSegmentUpserts(
   bookId: string,
   structure: BookStructure,
   decisions: FilterDecision[],
   options: SegmentOptions,
   revision: number,
-): BookSegmentUpsert[] {
+): Promise<BookSegmentUpsert[]> {
   const kept = keptBlocks(structure, decisions);
-  return planSegments(structure, kept, options).map((plan) => ({
+  const planned = await planBookSegments(structure, kept, options);
+  return planned.map((plan) => ({
     book_id: bookId,
     index: plan.index,
     title: plan.title,
@@ -206,12 +207,15 @@ export function segmentBlocks(
  *
  * A blank line between blocks is not cosmetic: it is the boundary the long-form
  * chunker splits on first, so paragraphs stay whole across synthesis requests.
+ * `leadIn` is announced before the body when the book, author, or chapter name
+ * is not already the first lines of the segment.
  */
-export function segmentNarrationText(blocks: readonly Block[]): string {
-  return blocks
+export function segmentNarrationText(blocks: readonly Block[], leadIn: readonly string[] = []): string {
+  const body = blocks
     .map((block) => block.text.trim())
-    .filter(Boolean)
-    .join("\n\n");
+    .filter(Boolean);
+  const prefix = leadIn.map((line) => line.trim()).filter(Boolean);
+  return [...prefix, ...body].join("\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +369,7 @@ export async function runSegmentRender(
 
   try {
     const book = await getBook(bookId);
-    if (!shouldCommitSegmentResult({ book, expectedRevision: context.revision })) {
+    if (!book || !shouldCommitSegmentResult({ book, expectedRevision: context.revision })) {
       logger.info(`abandoning stale book segment render, book_id: ${bookId}, index: ${index}`);
       await updateTask(taskId, { state: TASK_STATE_FAILED, error: "book changed before the render started", owner_id: null });
       return;
@@ -382,12 +386,17 @@ export async function runSegmentRender(
     if (!segment) throw new Error(`segment ${index} is no longer part of this book`);
 
     const decisions = resolveBookDecisions(structure, await listDecisionOverrides(bookId));
-    const text = segmentNarrationText(segmentBlocks(structure, decisions, segment.block_ids));
+    const blocks = segmentBlocks(structure, decisions, segment.block_ids);
+    const text = segmentNarrationText(
+      blocks,
+      announcementLines(structure, { index: segment.index, title: segment.title }, blocks),
+    );
     if (!text) throw new Error("every block in this segment was filtered out, so there is nothing to narrate");
 
-    const directory = taskDir(taskId);
-    const audioFile = join(directory, "narration.mp3");
-    const subtitleFile = join(directory, "subtitle.srt");
+    const directory = bookSegmentDir(book.title, bookId, index, segment.title);
+    const stem = bookSegmentFileStem(segment.title, index);
+    const audioFile = join(directory, `${stem}.mp3`);
+    const subtitleFile = join(directory, `${stem}.srt`);
 
     await appendTaskLog(taskId, `narrating "${segment.title}" (${text.length} characters)`);
 
@@ -421,7 +430,7 @@ export async function runSegmentRender(
 
     const [width, height] = aspectToResolution(params.video_aspect as VideoAspectValue);
     const fontFile = join(fontDir(), params.font_name);
-    const coverPath = await ensureCoverImage(book!, width, height, fontFile);
+    const coverPath = await ensureCoverImage(book, width, height, fontFile);
 
     // Burning is a preference, not a guarantee: a Homebrew ffmpeg routinely
     // ships without libass, and asking it to burn fails the whole encode. The
@@ -438,7 +447,7 @@ export async function runSegmentRender(
       await writeAssFile(assPath, narration.cues, assRenderOptionsFromParams(videoParamsForBookRender(params)));
     }
 
-    const videoFile = join(directory, `segment-${String(index).padStart(4, "0")}.mp4`);
+    const videoFile = join(directory, `${stem}.mp4`);
     const needsMux = wantsCaptions && !canBurn;
     // ffmpeg cannot read and write one file, so a soft mux needs its own input.
     const renderTarget = needsMux ? join(directory, "segment-silent-subs.mp4") : videoFile;

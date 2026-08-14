@@ -11,7 +11,7 @@
  * python-version/app/services/task.py, widened to cover generation too.
  */
 
-import { bookSegmentsCollection, tasksCollection } from "../db/client.ts";
+import { booksCollection, bookSegmentsCollection, tasksCollection } from "../db/client.ts";
 import { syncBookState } from "../db/books.ts";
 import {
   CROSS_POST_STATE_FAILED,
@@ -31,11 +31,20 @@ export interface RecoveryResult {
   generation: number;
   crossPost: number;
   bookSegments: number;
+  /** Books whose remaining segments were handed back to the queue. */
+  booksResumed: number;
+  segmentsResumed: number;
 }
 
 export async function recoverInterruptedTasks(): Promise<RecoveryResult> {
   const collection = tasksCollection();
-  const result: RecoveryResult = { generation: 0, crossPost: 0, bookSegments: 0 };
+  const result: RecoveryResult = {
+    generation: 0,
+    crossPost: 0,
+    bookSegments: 0,
+    booksResumed: 0,
+    segmentsResumed: 0,
+  };
 
   const candidates = await collection
     .find(
@@ -93,10 +102,22 @@ export async function recoverInterruptedTasks(): Promise<RecoveryResult> {
   // sweep, without repeating the liveness check.
   result.bookSegments = await recoverInterruptedBookSegments();
 
+  // Strictly last: resuming reads the segment states the two passes above have
+  // just settled, so a segment failed a moment ago for a dead owner is picked
+  // up here rather than left behind by a stale read.
+  const resumed = await resumeInterruptedBookRenders();
+  result.booksResumed = resumed.books;
+  result.segmentsResumed = resumed.segments;
+
   if (result.generation || result.crossPost || result.bookSegments) {
     logger.warning(
       `recovered interrupted tasks: generation=${result.generation}, ` +
         `cross_post=${result.crossPost}, book_segments=${result.bookSegments}`,
+    );
+  }
+  if (result.booksResumed) {
+    logger.success(
+      `resumed ${result.segmentsResumed} segment(s) across ${result.booksResumed} interrupted book render(s)`,
     );
   }
 
@@ -151,4 +172,73 @@ export async function recoverInterruptedBookSegments(): Promise<number> {
   }
 
   return recovered;
+}
+
+/**
+ * Hands an interrupted book render back to the queue.
+ *
+ * The fan-out that feeds segments to the task queue lives in memory, so a
+ * restart does not merely interrupt the segments that were in flight — it
+ * abandons every segment still waiting behind them. Marking the in-flight ones
+ * failed, as the sweep above does, leaves a book reading "62 pending" with
+ * nothing on earth about to render them. On a sixteen-hour audiobook that is
+ * the difference between a pause and a total loss.
+ *
+ * Only work that was demonstrably interrupted is resumed. A segment that failed
+ * on its own merits — a voice that does not exist, an unreadable cover — would
+ * fail again immediately, so it is left for the user to retry deliberately;
+ * `render_params` must also already be stored, since without them there is no
+ * voice or aspect to render with, and a book nobody ever started rendering has
+ * none.
+ */
+export async function resumeInterruptedBookRenders(): Promise<{ books: number; segments: number }> {
+  // Imported lazily: this module is loaded during startup reconciliation, and
+  // the pipeline pulls in ffmpeg, TTS and the settings store behind it.
+  const { renderBookSegments } = await import("./bookPipeline.ts");
+  const books = booksCollection();
+  const segments = bookSegmentsCollection();
+
+  const candidates = await books
+    .find({ state: "rendering", render_params: { $ne: null } }, { projection: { _id: 1, render_params: 1 } })
+    .toArray();
+
+  let resumedBooks = 0;
+  let resumedSegments = 0;
+
+  for (const book of candidates) {
+    const params = book.render_params;
+    if (!params) continue;
+
+    const pending = await segments
+      .find(
+        {
+          book_id: book._id,
+          $or: [{ state: "pending" }, { state: "failed", error: INTERRUPTED_SEGMENT_ERROR }],
+        },
+        { projection: { index: 1 } },
+      )
+      .toArray();
+
+    if (pending.length === 0) {
+      // Nothing left to do; the book is finished or every remaining failure is
+      // a real one. Let the usual reconciliation settle its state.
+      await syncBookState(book._id);
+      continue;
+    }
+
+    const indexes = pending.map((segment) => segment.index).sort((a, b) => a - b);
+    try {
+      await renderBookSegments(book._id, indexes, params);
+      resumedBooks += 1;
+      resumedSegments += indexes.length;
+      logger.info(`resumed book render, book_id: ${book._id}, segments: ${indexes.length}`);
+    } catch (error) {
+      // One unresumable book must not stop the others, and must not stop
+      // startup either.
+      logger.warning(`failed to resume book render, book_id: ${book._id}, error: ${String(error)}`);
+      await syncBookState(book._id);
+    }
+  }
+
+  return { books: resumedBooks, segments: resumedSegments };
 }

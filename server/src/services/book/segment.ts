@@ -170,7 +170,10 @@ export function planSegments(
           ? // One video per chapter: only the hard ceiling ever splits a chapter, so a
             // chapter shorter than the maximum survives as a single segment.
             chapterChanged || combined > options.maxDurationSeconds
-          : combined > options.maxDurationSeconds ||
+          : // Duration (and a stray `smart` call that skipped the AI path) fill
+            // toward the target, prefer a chapter join once past 60%, and never
+            // cross the ceiling except for an indivisible block.
+            combined > options.maxDurationSeconds ||
             openSeconds >= options.targetDurationSeconds ||
             (chapterChanged && openSeconds >= options.targetDurationSeconds * PREFERRED_SPLIT_RATIO);
 

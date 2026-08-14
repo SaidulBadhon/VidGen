@@ -31,6 +31,7 @@ import {
   DEFAULT_SOCIAL_PLATFORM,
   SOCIAL_PLATFORMS,
   buildScriptPrompt,
+  buildSegmentBoundariesPrompt,
   buildSocialMetadataPrompt,
   buildTermsPrompt,
   clampText,
@@ -41,6 +42,8 @@ import {
   resolveSocialPlatform,
   MAX_SCRIPT_PROMPT_LENGTH,
   MAX_SCRIPT_SYSTEM_PROMPT_LENGTH,
+  MAX_SEGMENT_TITLE_LENGTH,
+  type SegmentOutlineLine,
 } from "./prompts.ts";
 
 const MAX_RETRIES = 5;
@@ -404,6 +407,148 @@ function finalizeSocialMetadata(
 
   if (!title && !caption) return null;
   return { title, caption, hashtags };
+}
+
+// ---------------------------------------------------------------------------
+// Book segment boundaries
+// ---------------------------------------------------------------------------
+
+const segmentBoundariesSchema = z.object({
+  skip_block_ids: z.array(z.string()).optional(),
+  sections: z.array(
+    z.object({
+      start_block_id: z.string(),
+      title: z.string(),
+    }),
+  ),
+});
+
+export interface ProposedSection {
+  startBlockId: string;
+  title: string;
+}
+
+export interface ProposedBoundaries {
+  sections: ProposedSection[];
+  skipBlockIds: string[];
+}
+
+function collectSkipBlockIds(raw: unknown): string[] {
+  if (!raw || typeof raw !== "object") return [];
+  const record = raw as Record<string, unknown>;
+  const values = record.skip_block_ids ?? record.skipBlockIds;
+  if (!Array.isArray(values)) return [];
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const value of values) {
+    const id = String(value ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function finalizeProposedSections(raw: unknown): ProposedSection[] {
+  const sections = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as { sections?: unknown }).sections)
+      ? (raw as { sections: unknown[] }).sections
+      : [];
+
+  const result: ProposedSection[] = [];
+  const seen = new Set<string>();
+  for (const entry of sections) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const startBlockId = String(record.start_block_id ?? record.startBlockId ?? "").trim();
+    const title = clampText(record.title, MAX_SEGMENT_TITLE_LENGTH);
+    if (!startBlockId || seen.has(startBlockId)) continue;
+    seen.add(startBlockId);
+    result.push({ startBlockId, title });
+  }
+  return result;
+}
+
+function finalizeProposedBoundaries(raw: unknown): ProposedBoundaries {
+  return {
+    sections: finalizeProposedSections(raw),
+    skipBlockIds: collectSkipBlockIds(raw),
+  };
+}
+
+/**
+ * Asks the configured model to mark chapter/section starts from a compact outline.
+ *
+ * Local models often lack structured-output support, so this follows the same
+ * generateObject-then-text fallback as search terms. An empty result is a
+ * soft failure: the caller falls back to heuristic section detection.
+ */
+export async function generateSegmentBoundaries(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  targetSeconds: number;
+  maxSeconds: number;
+  totalSeconds: number;
+  units: SegmentOutlineLine[];
+  chunkIndex?: number;
+  chunkCount?: number;
+}): Promise<ProposedBoundaries> {
+  if (options.units.length === 0) return { sections: [], skipBlockIds: [] };
+
+  const prompt = buildSegmentBoundariesPrompt(options);
+  logger.info(
+    `detecting book sections: title=${options.bookTitle}, units=${options.units.length}` +
+      (options.chunkCount && options.chunkCount > 1
+        ? `, chunk=${options.chunkIndex}/${options.chunkCount}`
+        : ""),
+  );
+
+  const { spec, model, apiKey } = await resolveProvider();
+  let lastError = "";
+  const attempts = 3;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { object } = await generateObject({ model, schema: segmentBoundariesSchema, prompt });
+      const proposed = finalizeProposedBoundaries(object);
+      if (proposed.sections.length > 0 || proposed.skipBlockIds.length > 0) {
+        logger.success(
+          `completed: ${proposed.sections.length} proposed sections, ${proposed.skipBlockIds.length} skipped ids`,
+        );
+        return proposed;
+      }
+      lastError = "model returned no sections";
+    } catch (structuredError) {
+      logger.debug(
+        `structured section detection failed, falling back to text: ${errorMessage(structuredError)}`,
+      );
+      try {
+        const { text } = await generateText({ model, prompt });
+        const cleaned = normalizeTextResponse(text, spec.providerId);
+        const parsed = extractJson<unknown>(cleaned, "{");
+        const proposed = finalizeProposedBoundaries(parsed);
+        if (proposed.sections.length > 0 || proposed.skipBlockIds.length > 0) {
+          logger.success(
+            `completed: ${proposed.sections.length} proposed sections, ${proposed.skipBlockIds.length} skipped ids`,
+          );
+          return proposed;
+        }
+        lastError = "response is not a list of sections";
+      } catch (textError) {
+        lastError = sanitizeError(textError, apiKey);
+      }
+      logger.warning(`failed to detect book sections: ${lastError}`);
+    }
+
+    if (attempt < attempts) {
+      logger.warning(`failed to detect book sections, trying again... ${attempt}`);
+    }
+  }
+
+  logger.error(`failed to detect book sections: ${lastError}`);
+  return { sections: [], skipBlockIds: [] };
 }
 
 // ---------------------------------------------------------------------------

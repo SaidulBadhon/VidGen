@@ -41,6 +41,8 @@ export interface Block {
   order: number;
   /** PDF page this block came from. Unused by EPUB and plain text. */
   page?: number;
+  /** Present only when the text was recognised from an image. */
+  ocr?: OcrProvenance;
 }
 
 /**
@@ -131,9 +133,15 @@ export interface SegmentPlan {
   chapterIds: string[];
 }
 
+export type SegmentMode = "chapter" | "duration" | "smart";
+
 export interface SegmentOptions {
-  /** `chapter` gives one video per chapter; `duration` targets a fixed length. */
-  mode: "chapter" | "duration";
+  /**
+   * `chapter` gives one video per chapter; `duration` targets a fixed length;
+   * `smart` finds chapter/section breaks (heuristics plus the configured LLM)
+   * and packs those toward the target length.
+   */
+  mode: SegmentMode;
   targetDurationSeconds: number;
   /** Hard ceiling. A segment closes rather than exceed this. */
   maxDurationSeconds: number;
@@ -152,7 +160,25 @@ export const DEFAULT_SEGMENT_OPTIONS: SegmentOptions = {
 // Extraction
 // ---------------------------------------------------------------------------
 
-export type BookSourceFormat = "epub" | "text";
+export type BookSourceFormat = "epub" | "text" | "pdf";
+
+/**
+ * Provenance for text that was recognised from an image rather than read.
+ *
+ * OCR output is never as trustworthy as a text layer, and a vision model's
+ * output is untrustworthy in a specific way: it fails by inventing fluent,
+ * plausible prose rather than by producing obvious garbage. Narrated aloud that
+ * is undetectable, so every recognised block carries its provenance and score
+ * and is surfaced in the review screen for a human before it can be spoken.
+ */
+export interface OcrProvenance {
+  /** Engine that produced the text, e.g. `tesseract` or `ollama:<model>`. */
+  provider: string;
+  /** 0..1. Engine-reported where available, conservative estimate otherwise. */
+  confidence: number;
+  /** Page image kept for review, relative to the book directory. */
+  imagePath?: string;
+}
 
 export interface ExtractionResult {
   structure: BookStructure;

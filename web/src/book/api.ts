@@ -38,14 +38,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // Types
 // ---------------------------------------------------------------------------
 
-export type BookState = "extracting" | "ready" | "rendering" | "complete" | "failed";
+/**
+ * `ocr_pending` and `ocr` are the scanned-PDF detour: the upload was accepted,
+ * but there is nothing to review until an engine has read every page image.
+ */
+export type BookState =
+  | "extracting"
+  | "ocr_pending"
+  | "ocr"
+  | "ready"
+  | "rendering"
+  | "complete"
+  | "failed";
+
+/** True while a book is queued for, or going through, recognition. */
+export function isOcrState(state: BookState | undefined): boolean {
+  return state === "ocr_pending" || state === "ocr";
+}
 export type BookSegmentState = "pending" | "queued" | "rendering" | "complete" | "failed";
-export type SegmentMode = "chapter" | "duration";
+export type SegmentMode = "chapter" | "duration" | "smart";
 export type SubtitleRenderMode = "burn" | "soft" | "none";
 /** `llm` is not produced yet; the filter is structural-only for now. */
 export type DecisionSource = "structural" | "user" | "llm";
 
-export const SEGMENT_MODES: readonly SegmentMode[] = ["chapter", "duration"];
+export const SEGMENT_MODES: readonly SegmentMode[] = ["chapter", "duration", "smart"];
 export const SUBTITLE_RENDER_MODES: readonly SubtitleRenderMode[] = ["burn", "soft", "none"];
 export const VIDEO_ASPECTS: readonly string[] = ["16:9", "9:16", "1:1"];
 
@@ -60,7 +76,7 @@ export const MAX_SEGMENT_SECONDS = 4 * 60 * 60;
 export const MIN_WORDS_PER_MINUTE = 60;
 export const MAX_WORDS_PER_MINUTE = 400;
 
-export const ACCEPTED_BOOK_EXTENSIONS = ".epub,.txt,.md,.markdown,.text";
+export const ACCEPTED_BOOK_EXTENSIONS = ".epub,.pdf,.txt,.md,.markdown,.text";
 export const ACCEPTED_COVER_EXTENSIONS = ".png,.jpg,.jpeg,.webp";
 
 export interface SegmentOptions {
@@ -101,6 +117,27 @@ export interface BookRenderRequest {
   segment_indexes?: number[];
 }
 
+/**
+ * How far a scanned book's recognition has got.
+ *
+ * `source_path` is deliberately absent: the server keeps the uploaded PDF but
+ * never tells the browser where.
+ */
+export interface BookOcr {
+  pages: number[];
+  pages_total: number;
+  pages_done: number;
+  /** Pages no engine could read. They are skipped, not fatal. */
+  pages_failed: number;
+  provider: string;
+  /** 0..1 over the pages read so far. Recognised text is never certain. */
+  mean_confidence: number;
+  task_id?: string | null;
+  error?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
 export interface Book {
   _id: string;
   title: string;
@@ -117,6 +154,8 @@ export interface Book {
   kept_block_count: number;
   segment_options: SegmentOptions;
   render_params?: BookRenderParams | null;
+  /** Present only for a scanned PDF that needed OCR. */
+  ocr?: BookOcr | null;
   warnings?: string[];
   error?: string | null;
   created_at?: string;
@@ -204,6 +243,16 @@ export interface BookUploadResult {
   segments: number;
   warnings: string[];
   decisions: DecisionSummary;
+  /** Present when the upload was a scan and went to the OCR queue instead. */
+  ocr?: { pages: number; task_id: string };
+}
+
+export interface OcrResumeResult {
+  book_id: string;
+  task_id: string;
+  pages: number;
+  /** Pages a previous run already read and this one will not pay for again. */
+  resumed: number;
 }
 
 export interface BookListPage {
@@ -295,6 +344,15 @@ export const bookApi = {
   coverUrl: (bookId: string, revision: number) =>
     `/api/v1${bookPath(bookId, "/cover")}?v=${revision}`,
 
+  /**
+   * Restarts a recognition pass that stopped without finishing.
+   *
+   * Pages already read are on disk, so this costs only what is left; the server
+   * answers 409 when a pass is genuinely still running.
+   */
+  resumeOcr: (bookId: string) =>
+    request<OcrResumeResult>(bookPath(bookId, "/ocr"), { method: "POST" }),
+
   render: (bookId: string, body: BookRenderRequest) =>
     request<RenderResult>(bookPath(bookId, "/render"), { method: "POST", body: JSON.stringify(body) }),
 
@@ -316,6 +374,12 @@ export const bookApi = {
 // Progress stream
 // ---------------------------------------------------------------------------
 
+/** One line a running task wrote about itself. `segment` is -1 for the OCR pass. */
+export interface BookLogLine {
+  segment: number;
+  line: string;
+}
+
 export interface BookEvent {
   book_id: string;
   state: BookState;
@@ -330,6 +394,19 @@ export interface BookEvent {
     failed: number;
   };
   segments: { index: number; state: BookSegmentState }[];
+  ocr?: {
+    pages_total: number;
+    pages_done: number;
+    pages_failed: number;
+    mean_confidence: number;
+  } | null;
+  /**
+   * The tail of what the active work is saying, newest last.
+   *
+   * Bounded server-side to a couple of dozen lines and rendered as it arrives,
+   * so neither the payload nor the browser accumulates a book-length transcript.
+   */
+  recent_logs?: BookLogLine[];
 }
 
 /**
@@ -403,6 +480,27 @@ export function formatDuration(seconds: number | null | undefined): string {
   const minutes = Math.floor((total % 3600) / 60);
   if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   return `${minutes}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/**
+ * Retargets a streamed task-file URL so the browser saves it.
+ *
+ * Segment URLs are `/tasks/...` (optionally behind `app.endpoint`). Those
+ * paths play inline. The video API already exposes `/api/v1/download/...`
+ * with `Content-Disposition: attachment`; this keeps the same relative path.
+ */
+export function taskDownloadUrl(fileUrl: string): string {
+  const marker = "/tasks/";
+  const at = fileUrl.indexOf(marker);
+  if (at < 0) return fileUrl;
+  return `/api/v1/download/${fileUrl.slice(at + marker.length)}`;
+}
+
+/** A filename the browser can save, derived from the segment title. */
+export function segmentDownloadName(title: string, fileUrl: string): string {
+  const ext = fileUrl.split("?")[0]?.split(".").pop() || "bin";
+  const base = title.replace(/[^\p{L}\p{N}\s._-]+/gu, "").trim().replace(/\s+/g, " ") || "segment";
+  return `${base}.${ext}`;
 }
 
 /** A change was refused because segments are mid-render. */

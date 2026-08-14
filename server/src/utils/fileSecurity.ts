@@ -78,3 +78,43 @@ export function sanitizeUploadFilename(filename: string | undefined | null): str
   }
   return normalized;
 }
+
+const WINDOWS_INVALID_NAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
+const WINDOWS_RESERVED_NAMES = new Set([
+  "CON",
+  "PRN",
+  "AUX",
+  "NUL",
+  ...Array.from({ length: 9 }, (_, index) => `COM${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `LPT${index + 1}`),
+]);
+
+const MAX_OUTPUT_NAME_LENGTH = 120;
+
+/**
+ * Turns a book or segment title into a single filesystem path segment.
+ *
+ * Spaces and punctuation that are legal on disk are kept so Finder shows the
+ * real chapter name; separators, control characters and Windows device names
+ * are stripped so the folder cannot escape `storage/tasks`.
+ */
+export function sanitizeOutputName(name: string, fallback = "untitled"): string {
+  let value = String(name ?? "")
+    .replace(/[/\\]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(WINDOWS_INVALID_NAME_CHARS, "")
+    .replace(/^[. ]+/g, "")
+    .replace(/[. ]+$/g, "");
+
+  if (!value || value === "." || value === "..") value = fallback;
+
+  const reserved = value.split(".")[0]!.toUpperCase();
+  if (WINDOWS_RESERVED_NAMES.has(reserved)) value = `${fallback} ${value}`.trim();
+
+  if (value.length > MAX_OUTPUT_NAME_LENGTH) {
+    value = value.slice(0, MAX_OUTPUT_NAME_LENGTH).replace(/[. ]+$/g, "");
+  }
+
+  return value || fallback;
+}

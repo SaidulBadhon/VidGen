@@ -86,6 +86,31 @@ export const appSettingsSchema = z.object({
   /** Empty means the app default (libx264). Unsupported encoders fall back. */
   video_codec: z.enum(["", ...SUPPORTED_VIDEO_CODECS]).default(""),
 
+  // --- Book OCR ------------------------------------------------------------
+  /**
+   * Engine for pages with no text layer. "" disables OCR, so a scanned page
+   * yields nothing rather than guessed text — the safe default for a pipeline
+   * that narrates what it extracts.
+   */
+  ocr_provider: z.enum(["", "tesseract", "ollama"]).default(""),
+  /** Tesseract language code(s), e.g. "eng" or "eng+deu". Vision models ignore it. */
+  ocr_language: z.string().default("eng"),
+  /** Explicit path to the tesseract binary; empty resolves it from PATH. */
+  tesseract_path: z.string().default(""),
+  /** Must be a vision-capable Ollama model, and tagged: a bare name can be rejected. */
+  ocr_ollama_model: z.string().default("minicpm-v:latest"),
+  /**
+   * Overrides the built-in transcription prompt. Empty keeps it, and empty is
+   * strongly preferred: the built-in wording is the one measured to stop the
+   * model inventing structural labels, and it ships with the code rather than
+   * being frozen into this document on first save.
+   */
+  ocr_ollama_prompt: z.string().default(""),
+  /** Seconds for one page. A stuck vision model must not hang a book import. */
+  ocr_ollama_timeout: z.number().default(120),
+  /** 0..1. Tesseract pages scoring below this are re-read by the vision model. */
+  ocr_min_confidence: z.number().min(0).max(1).default(0.75),
+
   // --- Storage and task runtime -------------------------------------------
   /** Public base URL for generated media links; empty yields relative paths. */
   endpoint: z.string().default(""),

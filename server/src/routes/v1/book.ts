@@ -39,6 +39,7 @@ import {
   writeBookStructure,
   bumpBookRevision,
   aggregateSegmentProgress,
+  isBookOcrState,
 } from "../../db/books.ts";
 import type { BookDocument, BookSegmentDocument } from "../../db/types.ts";
 import { badRequest, conflict, notFound } from "../../http/errors.ts";
@@ -53,21 +54,23 @@ import {
   segmentOptionsFromDocument,
   segmentOptionsToDocument,
 } from "../../models/bookSchema.ts";
-import { extractBook, detectBookFormat } from "../../services/book/extract/index.ts";
+import { extractBook, detectBookFormat, type PdfScanReport } from "../../services/book/extract/index.ts";
 import { decisionSummary, keptBlocks } from "../../services/book/filter/decisions.ts";
-import { BookExtractionError } from "../../services/book/types.ts";
+import { isOcrEnabled } from "../../services/book/ocr/index.ts";
+import { BookExtractionError, type ExtractionResult } from "../../services/book/types.ts";
 import {
   ACTIVE_SEGMENT_STATES,
   bookGateStats,
   buildSegmentUpserts,
   renderBookSegments,
 } from "../../tasks/bookPipeline.ts";
+import { ocrSourcePath, startBookOcr } from "../../tasks/ocrPipeline.ts";
 import { taskQueue } from "../../tasks/queue.ts";
-import { deleteTask, getTask } from "../../tasks/state.ts";
+import { deleteTask, getRecentTaskLogs, getTask } from "../../tasks/state.ts";
 import { resolvePathWithinDirectory, sanitizeUploadFilename, UnsafePathError } from "../../utils/fileSecurity.ts";
 import { errorMessage, logger } from "../../utils/logger.ts";
 import { getResponse, getUuid, sleep } from "../../utils/misc.ts";
-import { taskDir } from "../../utils/paths.ts";
+import { bookProjectFolderName, taskDir } from "../../utils/paths.ts";
 
 export const bookRouter = new Hono();
 
@@ -85,12 +88,28 @@ export const bookRouter = new Hono();
 export const MAX_BOOK_UPLOAD_BYTES = 64 * 1024 * 1024;
 export const MAX_COVER_UPLOAD_BYTES = 12 * 1024 * 1024;
 
-const ALLOWED_BOOK_EXTENSIONS = ["epub", "txt", "text", "md", "markdown"] as const;
+const ALLOWED_BOOK_EXTENSIONS = ["epub", "pdf", "txt", "text", "md", "markdown"] as const;
 const ALLOWED_COVER_EXTENSIONS = ["png", "jpg", "jpeg", "webp"] as const;
 
 /** `PK\x03\x04`; every zip, and therefore every EPUB, starts with it. */
 function isZip(bytes: Uint8Array): boolean {
   return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/** `%PDF`. Real files sometimes carry junk before it, so a short prefix is scanned. */
+function isPdf(bytes: Uint8Array): boolean {
+  const limit = Math.min(bytes.length - 4, 1024);
+  for (let index = 0; index <= limit; index++) {
+    if (
+      bytes[index] === 0x25 &&
+      bytes[index + 1] === 0x50 &&
+      bytes[index + 2] === 0x44 &&
+      bytes[index + 3] === 0x46
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -192,8 +211,17 @@ function segmentFileToUri(file: string | null | undefined): string | null {
 
 /** Strips host paths; the cover is reachable through its own endpoint instead. */
 function publicBook(book: BookDocument): Record<string, unknown> {
-  const { cover_path, ...rest } = book;
-  return { ...rest, has_cover: Boolean(cover_path && existsSync(cover_path)) };
+  const { cover_path, ocr, ...rest } = book;
+  // The OCR record carries the absolute path of the stored upload, which is a
+  // host path like any other and stays on the server. Everything else in it —
+  // the page counts the import screen shows — is safe to send.
+  const { source_path, ...publicOcr } = ocr ?? {};
+  void source_path;
+  return {
+    ...rest,
+    ...(ocr ? { ocr: publicOcr } : {}),
+    has_cover: Boolean(cover_path && existsSync(cover_path)),
+  };
 }
 
 function publicSegment(segment: BookSegmentDocument): Record<string, unknown> {
@@ -233,6 +261,61 @@ function requireIdleSegments(bookId: string, segments: BookSegmentDocument[]): v
 }
 
 // ---------------------------------------------------------------------------
+// What an extraction that found nothing means
+// ---------------------------------------------------------------------------
+
+export const NO_TEXT_MESSAGE = "no readable text was found in this file";
+
+/**
+ * Refusal for a scan when OCR is switched off.
+ *
+ * Deliberately not a silent acceptance. A book with no text layer and no engine
+ * to read it can never be narrated, and accepting it would leave the user with a
+ * library entry that fails at the far end of a render for a reason nobody could
+ * see. Naming the setting is the difference between an error and an instruction.
+ */
+export const OCR_DISABLED_MESSAGE =
+  "this PDF has no text layer; it is a scanned book and needs OCR. " +
+  "Enable OCR in Settings (ocr_provider) and upload it again.";
+
+export type ExtractionOutcome =
+  | { action: "accept" }
+  /** Recognise these 1-based pages in the background, then land in `ready`. */
+  | { action: "ocr"; pages: number[] }
+  | { action: "reject"; message: string };
+
+export interface ExtractionOutcomeInput {
+  blockCount: number;
+  /** The PDF scan report, or null when the upload was not a PDF. */
+  scan: PdfScanReport | null;
+  ocrEnabled: boolean;
+}
+
+/**
+ * Decides what an upload that yielded no blocks actually is.
+ *
+ * Three different situations arrive here looking identical, and answering all of
+ * them with one message is what made a scanned book indistinguishable from an
+ * empty file: a genuinely empty upload, a scan with no engine configured, and a
+ * scan this server can read given half an hour. Only the first is a dead end.
+ */
+export function decideExtractionOutcome(input: ExtractionOutcomeInput): ExtractionOutcome {
+  if (input.blockCount > 0) return { action: "accept" };
+
+  const scannedPages = input.scan?.scannedPages ?? [];
+  if (scannedPages.length === 0) return { action: "reject", message: NO_TEXT_MESSAGE };
+  if (!input.ocrEnabled) return { action: "reject", message: OCR_DISABLED_MESSAGE };
+
+  return { action: "ocr", pages: [...scannedPages].sort((a, b) => a - b) };
+}
+
+/** The scan report a PDF extraction carries, or null for every other format. */
+export function pdfScanReport(result: ExtractionResult): PdfScanReport | null {
+  const scan = (result as { scan?: PdfScanReport }).scan;
+  return scan && Array.isArray(scan.scannedPages) ? scan : null;
+}
+
+// ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
 
@@ -252,13 +335,22 @@ bookRouter.post("/books", async (c) => {
 
   // Extension and content must agree in both directions. A zip named .txt would
   // otherwise be narrated as binary noise, and an .epub that is not a zip is
-  // better refused here than deep inside the EPUB reader.
+  // better refused here than deep inside the EPUB reader. The same reasoning
+  // applies to PDF, whose reader is even less forgiving of arbitrary bytes.
   const zip = isZip(bytes);
   if (zip && extension !== "epub") {
     throw badRequest("this file is a zip archive; upload it with a .epub extension if it is an EPUB");
   }
   if (!zip && extension === "epub") {
     throw badRequest("this file is not a valid EPUB (it is not a zip archive)");
+  }
+
+  const pdf = isPdf(bytes);
+  if (pdf && extension !== "pdf") {
+    throw badRequest("this file is a PDF; upload it with a .pdf extension");
+  }
+  if (!pdf && extension === "pdf") {
+    throw badRequest("this file is not a valid PDF (it does not start with %PDF)");
   }
 
   const options = bookSegmentOptionsSchema.parse(
@@ -274,20 +366,26 @@ bookRouter.post("/books", async (c) => {
   }
 
   const { structure, warnings } = extracted;
-  if (structure.blocks.length === 0) throw badRequest("no readable text was found in this file");
+  const scan = pdfScanReport(extracted);
+  const outcome = decideExtractionOutcome({
+    blockCount: structure.blocks.length,
+    scan,
+    ocrEnabled: isOcrEnabled(),
+  });
+  if (outcome.action === "reject") throw badRequest(outcome.message);
 
   const bookId = getUuid();
   const segmentOptions = segmentOptionsToDocument(options);
   const decisions = resolveBookDecisions(structure, []);
   const kept = keptBlocks(structure, decisions);
-  const segments = buildSegmentUpserts(
-    bookId,
-    structure,
-    decisions,
-    segmentOptionsFromDocument(segmentOptions),
-    1,
-  );
+  const segments =
+    outcome.action === "ocr"
+      ? []
+      : await buildSegmentUpserts(bookId, structure, decisions, segmentOptionsFromDocument(segmentOptions), 1);
 
+  // Written even when it is empty: the review screen reads it the moment the
+  // book appears in the library, and a missing file there reads as corruption
+  // rather than as work in progress.
   await writeBookStructure(bookId, structure);
 
   const book = await createBook({
@@ -298,7 +396,7 @@ bookRouter.post("/books", async (c) => {
     source_filename: name,
     format: detectBookFormat(bytes, name),
     cover_path: null,
-    state: "ready",
+    state: outcome.action === "ocr" ? "ocr_pending" : "ready",
     revision: 1,
     chapter_count: structure.chapters.length,
     block_count: structure.blocks.length,
@@ -311,6 +409,19 @@ bookRouter.post("/books", async (c) => {
 
   await replaceBookSegments(bookId, segments);
 
+  if (outcome.action === "ocr") {
+    const started = await beginOcr(book, bytes, outcome.pages, scan?.totalPages ?? outcome.pages.length);
+    return c.json(
+      getResponse(200, {
+        book: publicBook({ ...book, state: "ocr_pending" }),
+        segments: 0,
+        warnings,
+        decisions: decisionSummary(decisions),
+        ocr: { pages: started.pages, task_id: started.taskId },
+      }),
+    );
+  }
+
   logger.success(
     `book uploaded: ${bookId} "${book.title}" (${structure.blocks.length} blocks, ${segments.length} segments)`,
   );
@@ -322,6 +433,87 @@ bookRouter.post("/books", async (c) => {
       warnings,
       decisions: decisionSummary(decisions),
     }),
+  );
+});
+
+/**
+ * Keeps the uploaded PDF and queues the pass that reads it.
+ *
+ * The file has to survive the request that carried it: rasterising page 200
+ * happens twenty minutes later, and the multipart body is long gone by then. It
+ * lives in the book's own directory, so deleting the book takes it too.
+ */
+async function beginOcr(
+  book: BookDocument,
+  bytes: Uint8Array,
+  pages: number[],
+  totalPages: number,
+): Promise<{ taskId: string; pages: number }> {
+  const sourcePath = ocrSourcePath(book._id);
+  await Bun.write(sourcePath, bytes);
+
+  await patchBook(book._id, {
+    ocr: {
+      source_path: sourcePath,
+      pages,
+      pages_total: pages.length,
+      pages_done: 0,
+      pages_failed: 0,
+      provider: "",
+      mean_confidence: 0,
+      task_id: null,
+      error: null,
+      started_at: null,
+      finished_at: null,
+    },
+  });
+
+  const started = await startBookOcr({
+    bookId: book._id,
+    revision: book.revision,
+    sourcePath,
+    pages,
+    totalPages,
+  });
+
+  logger.success(
+    `scanned book accepted for ocr: ${book._id} "${book.title}" (${pages.length} of ${totalPages} pages)`,
+  );
+  return started;
+}
+
+/**
+ * Resumes an OCR pass that stopped without finishing.
+ *
+ * A restart cannot resume itself: the pass runs in-process, so a server that
+ * goes down mid-book leaves a record saying `ocr` with nothing working on it.
+ * The pages already recognised are on disk, so this costs only what is left —
+ * which is the entire reason the manifest is written page by page.
+ */
+bookRouter.post("/books/:id/ocr", async (c) => {
+  const bookId = c.req.param("id");
+  const book = await requireBook(bookId);
+
+  const ocr = book.ocr;
+  if (!ocr || ocr.pages.length === 0) throw badRequest("this book was not imported as a scan", bookId);
+  if (ocr.task_id && taskQueue.isActive(ocr.task_id)) {
+    throw conflict("this book is already being recognised", bookId);
+  }
+  if (!existsSync(ocr.source_path)) {
+    throw badRequest("the uploaded pdf is no longer on disk, so it cannot be read again", bookId);
+  }
+
+  const started = await startBookOcr({
+    bookId,
+    revision: book.revision,
+    sourcePath: ocr.source_path,
+    pages: ocr.pages,
+    totalPages: Math.max(ocr.pages_total, ...ocr.pages),
+  });
+
+  logger.info(`ocr resumed: ${bookId} (${started.pages} pages, ${ocr.pages_done} already read)`);
+  return c.json(
+    getResponse(200, { book_id: bookId, task_id: started.taskId, pages: started.pages, resumed: ocr.pages_done }),
   );
 });
 
@@ -421,7 +613,7 @@ async function replanBook(book: BookDocument, revision: number): Promise<number>
 
   const decisions = resolveBookDecisions(structure, await listDecisionOverrides(book._id));
   const kept = keptBlocks(structure, decisions);
-  const segments = buildSegmentUpserts(
+  const segments = await buildSegmentUpserts(
     book._id,
     structure,
     decisions,
@@ -429,6 +621,9 @@ async function replanBook(book: BookDocument, revision: number): Promise<number>
     revision,
   );
 
+  // Named output folders belong to the previous plan; leaving them would mix
+  // old chapter videos with the new titles after a re-plan.
+  await rm(join(taskDir(), bookProjectFolderName(book.title, book._id)), { recursive: true, force: true });
   await replaceBookSegments(book._id, segments);
   await patchBook(book._id, { kept_block_count: kept.length });
   await syncBookState(book._id);
@@ -613,6 +808,60 @@ bookRouter.post("/books/:id/segments/:index/render", async (c) => {
 // ---------------------------------------------------------------------------
 
 /**
+ * Segments whose logs are worth reading right now.
+ *
+ * Capped, and capped at the head of the list rather than the tail, because the
+ * queue starts segments in order: the two or three at the front are the ones
+ * actually running, and the other 297 have nothing to say yet.
+ */
+const MAX_LOGGED_SEGMENTS = 4;
+/** Lines pulled from each of those, and the ceiling on the joined feed. */
+const LOG_LINES_PER_SEGMENT = 12;
+const MAX_RECENT_LOG_LINES = 25;
+
+interface RecentLogLine {
+  /** Segment index, or -1 for the book-wide OCR pass. */
+  segment: number;
+  line: string;
+}
+
+/**
+ * The tail of what the active work is saying about itself.
+ *
+ * Books render for hours and until now said nothing while they did: the task
+ * records were full of "narrating chapter 12" and "chunk 40/57" and none of it
+ * ever reached a screen, so a sixteen-hour render and a stuck one looked
+ * identical. This is deliberately a small bounded window rather than the logs
+ * themselves — the whole reason this endpoint sends a projection is that a
+ * book-sized document cannot be re-serialised every second, and streaming every
+ * line would undo exactly that.
+ */
+async function recentBookLogs(
+  segments: readonly BookSegmentDocument[],
+  book: BookDocument,
+): Promise<RecentLogLine[]> {
+  const active = segments
+    .filter((segment) => segment.task_id && ACTIVE_SEGMENT_STATES.has(segment.state))
+    .slice(0, MAX_LOGGED_SEGMENTS);
+
+  const ocrTaskId = isBookOcrState(book.state) ? book.ocr?.task_id : null;
+  const taskIds = [...active.map((segment) => segment.task_id!), ...(ocrTaskId ? [ocrTaskId] : [])];
+  if (taskIds.length === 0) return [];
+
+  const logs = await getRecentTaskLogs(taskIds, LOG_LINES_PER_SEGMENT);
+  const lines: RecentLogLine[] = [];
+
+  for (const segment of active) {
+    for (const line of logs.get(segment.task_id!) ?? []) lines.push({ segment: segment.index, line });
+  }
+  for (const line of ocrTaskId ? (logs.get(ocrTaskId) ?? []) : []) lines.push({ segment: -1, line });
+
+  // Newest last, and only the tail survives: the feed is a window on now, not a
+  // transcript, and the browser renders exactly what arrives here.
+  return lines.slice(-MAX_RECENT_LOG_LINES);
+}
+
+/**
  * Aggregate progress over SSE.
  *
  * A projection, never the documents: a book carries hundreds of segments whose
@@ -634,11 +883,14 @@ bookRouter.get("/books/:id/events", async (c) => {
 
       const segments = await listBookSegments(bookId);
       const progress = aggregateSegmentProgress(segments);
+      // A book being recognised has no segments at all, so the segment-derived
+      // state reads `ready` — which is the one thing it certainly is not.
+      const recognising = isBookOcrState(book.state);
       const payload = JSON.stringify({
         book_id: bookId,
-        state: progress.state,
+        state: recognising ? book.state : progress.state,
         revision: book.revision,
-        progress: progress.progress,
+        progress: recognising ? ocrPercent(book) : progress.progress,
         counts: {
           total: progress.total,
           pending: progress.pending,
@@ -648,6 +900,15 @@ bookRouter.get("/books/:id/events", async (c) => {
           failed: progress.failed,
         },
         segments: segments.map((segment) => ({ index: segment.index, state: segment.state })),
+        ocr: book.ocr
+          ? {
+              pages_total: book.ocr.pages_total,
+              pages_done: book.ocr.pages_done,
+              pages_failed: book.ocr.pages_failed,
+              mean_confidence: book.ocr.mean_confidence,
+            }
+          : null,
+        recent_logs: await recentBookLogs(segments, book),
       });
 
       if (payload !== lastPayload) {
@@ -655,7 +916,7 @@ bookRouter.get("/books/:id/events", async (c) => {
         lastPayload = payload;
       }
 
-      if (progress.state !== "rendering") {
+      if (progress.state !== "rendering" && !recognising) {
         await stream.writeSSE({ event: "done", data: payload });
         return;
       }
@@ -664,6 +925,14 @@ bookRouter.get("/books/:id/events", async (c) => {
     }
   });
 });
+
+/** Pages read over pages to read, as a percentage. */
+function ocrPercent(book: BookDocument): number {
+  const total = book.ocr?.pages_total ?? 0;
+  if (total <= 0) return 0;
+  const attempted = (book.ocr?.pages_done ?? 0) + (book.ocr?.pages_failed ?? 0);
+  return Math.min(100, Math.round((attempted / total) * 100));
+}
 
 // ---------------------------------------------------------------------------
 // Deletion
@@ -679,13 +948,16 @@ bookRouter.get("/books/:id/events", async (c) => {
  */
 bookRouter.delete("/books/:id", async (c) => {
   const bookId = c.req.param("id");
-  await requireBook(bookId);
+  const book = await requireBook(bookId);
 
   const segments = await listBookSegments(bookId);
   let cancelled = 0;
   for (const segment of segments) {
     if (segment.task_id && taskQueue.cancel(segment.task_id)) cancelled += 1;
   }
+  // An OCR pass is not a segment, so the loop above never sees it; left running
+  // it would keep writing a manifest into a directory about to be deleted.
+  if (book?.ocr?.task_id && taskQueue.cancel(book.ocr.task_id)) cancelled += 1;
 
   // Bumping the revision makes any task that slipped past cancellation discard
   // its results instead of writing into a directory that is about to vanish.
@@ -699,6 +971,10 @@ bookRouter.delete("/books/:id", async (c) => {
       await deleteTask(segment.task_id);
     }
   }
+  await rm(join(taskDir(), bookProjectFolderName(book.title, book._id)), { recursive: true, force: true });
+  // The OCR task owns no task directory — its output lives in the book's own —
+  // so only the record has to go.
+  if (book.ocr?.task_id) await deleteTask(book.ocr.task_id);
 
   await deleteBook(bookId);
   await deleteBookFiles(bookId);

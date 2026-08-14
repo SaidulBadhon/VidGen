@@ -205,15 +205,18 @@ export function Slider({
   );
 }
 
-export function Button({
+export type ButtonVariant = "default" | "primary" | "danger" | "ghost";
+export type ButtonSize = "sm" | "md" | "lg";
+
+export function buttonClass({
   variant = "default",
   size = "md",
   className,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: "default" | "primary" | "danger" | "ghost";
-  size?: "sm" | "md" | "lg";
-}) {
+}: {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
+} = {}): string {
   const variants = {
     default: "border border-border bg-surface-2 hover:bg-border",
     primary: "bg-accent text-accent-fg hover:opacity-90",
@@ -222,18 +225,25 @@ export function Button({
   };
   const sizes = { sm: "px-2.5 py-1 text-xs", md: "px-3 py-2 text-sm", lg: "px-5 py-3 text-base font-medium" };
 
-  return (
-    <button
-      {...props}
-      className={cn(
-        "inline-flex items-center justify-center gap-2 rounded-lg transition outline-none",
-        "focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
-        variants[variant],
-        sizes[size],
-        className,
-      )}
-    />
+  return cn(
+    "inline-flex items-center justify-center gap-2 rounded-lg transition outline-none",
+    "focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
+    variants[variant],
+    sizes[size],
+    className,
   );
+}
+
+export function Button({
+  variant = "default",
+  size = "md",
+  className,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+}) {
+  return <button {...props} className={buttonClass({ variant, size, className })} />;
 }
 
 export function ColorInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {

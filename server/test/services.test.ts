@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { defaultSettings, settingsSchema } from "../src/config/schema.ts";
 import { __setSettingsForTest } from "../src/config/settings.ts";
 import { decodeLinuxRouteGateway } from "../src/config/runtime.ts";
-import { resolvePathWithinDirectory, sanitizeUploadFilename, UnsafePathError } from "../src/utils/fileSecurity.ts";
+import { resolvePathWithinDirectory, sanitizeOutputName, sanitizeUploadFilename, UnsafePathError } from "../src/utils/fileSecurity.ts";
 import { parseByteRange } from "../src/http/staticFiles.ts";
 import { sanitizeBgmFilename, shouldUseBgm, BgmUploadError } from "../src/services/bgm.ts";
 import { parseSrtContent, formatSrt } from "../src/services/subtitle/srt.ts";
@@ -28,6 +28,7 @@ import { materialSourceRecord } from "../src/services/material/download.ts";
 import { safePublicUrl } from "../src/services/material/http.ts";
 import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt } from "../src/services/llm/prompts.ts";
 import { extractJson, formatScriptResponse, stripCodeFence } from "../src/services/llm/index.ts";
+import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName } from "../src/utils/paths.ts";
 import { isOwnerAlive, parseOwner, PROCESS_OWNER_ID } from "../src/tasks/owner.ts";
 
 beforeAll(() => {
@@ -128,6 +129,46 @@ describe("sanitizeUploadFilename", () => {
   test("rejects empty and dot names", () => {
     expect(() => sanitizeUploadFilename("")).toThrow(UnsafePathError);
     expect(() => sanitizeUploadFilename("..")).toThrow(UnsafePathError);
+  });
+});
+
+describe("sanitizeOutputName", () => {
+  test("keeps a readable chapter title", () => {
+    expect(sanitizeOutputName("I. The Period")).toBe("I. The Period");
+    expect(sanitizeOutputName("A Tale of Two Cities")).toBe("A Tale of Two Cities");
+  });
+
+  test("strips path separators and reserved characters", () => {
+    expect(sanitizeOutputName("Book/The First: Recalled?")).toBe("Book The First Recalled");
+    expect(sanitizeOutputName("../escape")).toBe("escape");
+  });
+
+  test("falls back when the title is empty or only dots", () => {
+    expect(sanitizeOutputName("   ", "book")).toBe("book");
+    expect(sanitizeOutputName("...", "untitled")).toBe("untitled");
+  });
+
+  test("does not emit a Windows device name", () => {
+    expect(sanitizeOutputName("CON")).toBe("untitled CON");
+  });
+});
+
+describe("book output folders", () => {
+  test("names the project after the book title", () => {
+    expect(bookProjectFolderName("A Tale of Two Cities", "abc123def")).toBe("A Tale of Two Cities");
+  });
+
+  test("falls back to the book id when the title is empty", () => {
+    expect(bookProjectFolderName("   ", "abc123def")).toBe("abc123de");
+  });
+
+  test("names each video folder with a padded index and the segment title", () => {
+    expect(bookSegmentFolderName(0, "I. The Period")).toBe("001 I. The Period");
+    expect(bookSegmentFolderName(11, "Book the Second")).toBe("012 Book the Second");
+  });
+
+  test("uses the chapter title as the file stem inside that folder", () => {
+    expect(bookSegmentFileStem("I. The Period", 0)).toBe("I. The Period");
   });
 });
 

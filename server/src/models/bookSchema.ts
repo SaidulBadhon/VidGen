@@ -28,7 +28,7 @@ const MAX_SEGMENT_SECONDS = 4 * 60 * 60;
 
 export const bookSegmentOptionsSchema = z
   .object({
-    mode: z.enum(["chapter", "duration"]).default(DEFAULT_SEGMENT_OPTIONS.mode),
+    mode: z.enum(["chapter", "duration", "smart"]).default(DEFAULT_SEGMENT_OPTIONS.mode),
     target_duration_seconds: z
       .number()
       .int()
@@ -55,7 +55,7 @@ export type BookSegmentOptionsRequest = z.infer<typeof bookSegmentOptionsSchema>
 /** Multipart upload fields arrive as strings, so numbers are coerced. */
 export const bookUploadOptionsSchema = z
   .object({
-    mode: z.enum(["chapter", "duration"]).optional(),
+    mode: z.enum(["chapter", "duration", "smart"]).optional(),
     target_duration_seconds: z.coerce.number().int().optional(),
     max_duration_seconds: z.coerce.number().int().optional(),
     words_per_minute: z.coerce.number().int().optional(),

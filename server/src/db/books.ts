@@ -403,6 +403,28 @@ export async function bookProgress(bookId: string): Promise<BookProgress> {
 }
 
 /**
+ * Book states that describe the book itself rather than a render.
+ *
+ * Deriving a state from segment rows only makes sense once there is a book to
+ * segment. Before that — while it is extracting, while a scan is queued for or
+ * going through OCR, or after extraction failed outright — the segment table is
+ * empty, and `aggregateSegmentProgress` reads an empty table as `ready`. Letting
+ * that through would advertise a book as reviewable half an hour before it has
+ * a word in it.
+ */
+const SELF_DESCRIBING_BOOK_STATES: ReadonlySet<BookState> = new Set<BookState>([
+  "extracting",
+  "ocr_pending",
+  "ocr",
+  "failed",
+]);
+
+/** True while a book is queued for, or going through, recognition. */
+export function isBookOcrState(state: BookState): boolean {
+  return state === "ocr_pending" || state === "ocr";
+}
+
+/**
  * Writes the derived state back onto the book.
  *
  * Extraction failures are left alone: they describe the book itself rather than
@@ -411,7 +433,7 @@ export async function bookProgress(bookId: string): Promise<BookProgress> {
 export async function syncBookState(bookId: string): Promise<BookProgress> {
   const progress = await bookProgress(bookId);
   const book = await getBook(bookId);
-  if (book && book.state !== "extracting" && book.state !== "failed") {
+  if (book && !SELF_DESCRIBING_BOOK_STATES.has(book.state)) {
     await patchBook(bookId, { state: progress.state });
   }
   return progress;

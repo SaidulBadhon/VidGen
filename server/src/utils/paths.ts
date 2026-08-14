@@ -6,6 +6,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { sanitizeOutputName } from "./fileSecurity.ts";
 import { logger } from "./logger.ts";
 
 /**
@@ -41,6 +42,38 @@ export function resourceDir(subDir = ""): string {
 export function taskDir(subDir = ""): string {
   const base = join(storageDir(), "tasks");
   return ensure(subDir ? join(base, subDir) : base);
+}
+
+/**
+ * A book's folder under `storage/tasks`, named after the title so the rendered
+ * videos are findable next to short-video UUID dirs.
+ *
+ * Does not create the directory: callers that only need to delete it must not
+ * mkdir a moment before rm, the same way `deleteBookFiles` avoids `booksDir`.
+ */
+export function bookProjectFolderName(title: string, bookId: string): string {
+  return sanitizeOutputName(title, bookId.slice(0, 8) || "book");
+}
+
+/** `001 Chapter I` — padded so Finder lists videos in reading order. */
+export function bookSegmentFolderName(index: number, title: string): string {
+  const video = sanitizeOutputName(title, `segment-${index + 1}`);
+  return `${String(index + 1).padStart(3, "0")} ${video}`;
+}
+
+/** Stem for the mp4/mp3/srt inside a segment folder. */
+export function bookSegmentFileStem(title: string, index: number): string {
+  return sanitizeOutputName(title, `segment-${index + 1}`);
+}
+
+/** Working directory for one book segment render. Created on demand. */
+export function bookSegmentDir(
+  bookTitle: string,
+  bookId: string,
+  index: number,
+  segmentTitle: string,
+): string {
+  return taskDir(join(bookProjectFolderName(bookTitle, bookId), bookSegmentFolderName(index, segmentTitle)));
 }
 
 /**

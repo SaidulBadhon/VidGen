@@ -1,5 +1,5 @@
 /**
- * Prompt construction for script, search terms and social metadata.
+ * Prompt construction for script, search terms, social metadata and book segments.
  * Ported from python-version/app/services/llm.py.
  */
 
@@ -279,6 +279,84 @@ ${videoSubject}
 
 ### Video Script
 ${videoScript}`;
+}
+
+// ---------------------------------------------------------------------------
+// Book segment boundaries
+// ---------------------------------------------------------------------------
+
+export const MAX_SEGMENT_TITLE_LENGTH = 120;
+
+export interface SegmentOutlineLine {
+  index: number;
+  startBlockId: string;
+  kind: string;
+  seconds: number;
+  title: string;
+}
+
+export function buildSegmentBoundariesPrompt(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  targetSeconds: number;
+  maxSeconds: number;
+  totalSeconds: number;
+  units: SegmentOutlineLine[];
+  chunkIndex?: number;
+  chunkCount?: number;
+}): string {
+  const title = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const language = (options.language || "").trim();
+  const chunkNote =
+    options.chunkCount && options.chunkCount > 1
+      ? `\nThis is outline chunk ${options.chunkIndex ?? 1} of ${options.chunkCount}. Only return sections that start inside this chunk.`
+      : "";
+
+  const lines = options.units
+    .map((unit) => {
+      const label = unit.title.replace(/\s+/g, " ").trim().slice(0, 80);
+      return `${unit.index}\t${unit.startBlockId}\t${unit.kind}\t${Math.round(unit.seconds)}s\t${label}`;
+    })
+    .join("\n");
+
+  const exampleId = options.units[0]?.startBlockId ?? "0:0";
+
+  return `# Role: Audiobook Chapter Detector
+
+## Goal
+Mark the real chapter and section starts that a listener should hear. Do not turn the table of contents, copyright pages, or other unread apparatus into videos.
+
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must be: {"skip_block_ids":["..."],"sections":[{"start_block_id":"...","title":"..."}]}
+3. Every id MUST be copied exactly from the outline below. Do not invent ids.
+4. skip_block_ids are outline start_block_ids that must not be narrated: table of contents listings, "Contents" headings, running heads, page numbers, copyright/publisher boilerplate, and duplicate chapter titles that only appear as a list before the body. Do not skip narratable prose, a preface, a prologue, or the title/author lines that open the book.
+5. Sections are genuine narrative starts only — the first body occurrence of a chapter or titled section, never its table-of-contents echo. Do not start a section at the first outline id just because it is first.
+6. The first section should be the first real chapter or section of the book body (or a narratable prologue/preface). Title and author lines before that may stay; the contents list must not.
+7. Prefer published chapter titles (Chapter I, Book the First, I. The Period, and similar) over generic "Part N" labels. Title text is the chapter/section name only — do not repeat the book title or author in the title field.
+8. Do NOT slice the book into equal ${options.targetSeconds}-second chunks. Length is handled later. Your job is only to mark genuine starts and unread ids.
+9. Titles at most ${MAX_SEGMENT_TITLE_LENGTH} characters, in the book's language, without surrounding quotes.
+10. Include a section start when the outline kind is "heading" or "marker" and the title looks like a real chapter or book division that is followed by body text. You may also start a section at a "prose" id when a scene clearly changes and no heading is present.${chunkNote}
+
+## Length context
+- Target video length: ${options.targetSeconds} seconds
+- Maximum video length: ${options.maxSeconds} seconds
+- Approximate remaining narration in this outline: ${Math.round(options.totalSeconds)} seconds
+These numbers are for orientation only; do not invent extra splits just to hit the target.
+
+## Outline columns
+index, start_block_id, kind, estimated_seconds, title_or_preview
+
+## Book
+- title: ${title}${author ? `\n- author: ${author}` : ""}${language ? `\n- language: ${language}` : ""}
+
+## Outline
+${lines}
+
+## Output Example
+{"skip_block_ids":["${exampleId}"],"sections":[{"start_block_id":"${exampleId}","title":"I. The Period"}]}`;
 }
 
 /** Structured metadata used when the model is unavailable or unusable. */
