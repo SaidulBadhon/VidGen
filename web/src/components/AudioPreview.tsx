@@ -6,11 +6,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { AudioLines, FileText, Loader2 } from "lucide-react";
 import { api, ApiError, type MediaFile } from "../api/client.ts";
-import { useI18n } from "../i18n/index.tsx";
+import { SUPPORTED_LANGUAGES, translateIn, useI18n } from "../i18n/index.tsx";
 import { Alert, Button } from "./ui.tsx";
 
 const NO_VOICE = new Set(["no-voice", "none", ""]);
 const VIETNAMESE_CHARS = /[àáâãèéêìíòóôõùúýăđơưÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝĂĐƠƯ]/;
+
+/**
+ * Language code of an Azure/Edge voice, which carries its locale as a prefix:
+ * `bn-BD-PradeepNeural-Male`. Every other engine names voices without one
+ * (`gemini:Zephyr-Female`, `chatterbox:default-Female`) and yields null.
+ */
+function voiceLanguage(voiceName: string): string | null {
+  const match = /^([a-z]{2,3})-[A-Za-z]{2,}-/.exec(voiceName.trim());
+  return match?.[1] ?? null;
+}
 
 export function estimateVoiceoverDurationRange(text: string, voiceRate: number): [number, number] | null {
   const normalized = text.replace(/\s+/g, " ").trim();
@@ -33,14 +43,29 @@ function round1(value: number): number {
   return Math.round(value * 10) / 10;
 }
 
-function sampleTextForVoice(voiceName: string, fallback: string): string {
+/**
+ * Picks the sentence the sample voice reads aloud.
+ *
+ * It has to be in the *voice's* language, not the interface's: a Bangla voice
+ * handed the English sample speaks English, which tells you nothing about how
+ * the voice will sound narrating a Bangla script. Voices whose language has no
+ * locale file — and engines that do not name a language at all — keep reading
+ * the UI language's sample, since there is nothing better to offer them.
+ */
+function sampleTextForVoice(voiceName: string, uiSample: string): string {
   if (voiceName.startsWith("elevenlabs:")) {
+    // ElevenLabs voices carry no locale, so the language is inferred from the
+    // display name the account owner chose.
     const display = voiceName.split(":")[2] ?? "";
-    if (VIETNAMESE_CHARS.test(display)) {
-      return "Xin chào, đây là đoạn âm thanh thử nghiệm giọng nói.";
-    }
+    if (VIETNAMESE_CHARS.test(display)) return translateIn("vi", "Voice Example");
+    return uiSample;
   }
-  return fallback;
+
+  const language = voiceLanguage(voiceName);
+  if (language && SUPPORTED_LANGUAGES.includes(language)) {
+    return translateIn(language, "Voice Example");
+  }
+  return uiSample;
 }
 
 function PreviewPlayer({ src, volume }: { src: string; volume?: number }) {
@@ -63,12 +88,12 @@ export function VoicePreview({
   voiceName,
   voiceRate,
   voiceVolume,
-  script,
+  script = "",
 }: {
   voiceName: string;
   voiceRate: number;
   voiceVolume: number;
-  script: string;
+  script?: string;
 }) {
   const { t } = useI18n();
   const disabled = NO_VOICE.has(voiceName.trim().toLowerCase());
@@ -147,43 +172,54 @@ export function VoicePreview({
       : synthesize.error
         ? String((synthesize.error as Error).message)
         : null;
+  const sampleButton = (
+    <Button
+      size="sm"
+      className={scriptContent ? undefined : "w-full"}
+      disabled={pending}
+      title={t("Play Voice")}
+      onClick={() => synthesize.mutate("sample")}
+    >
+      {pending && synthesize.variables === "sample" ? (
+        <Loader2 size={14} className="animate-spin" />
+      ) : (
+        <AudioLines size={14} />
+      )}
+      {t("Play Voice")}
+    </Button>
+  );
 
   return (
     <div className="space-y-2 rounded-lg border border-border bg-surface-2/60 p-3">
-      {estimated ? (
-        <p className="text-xs text-muted">{t("Estimated Voiceover Duration", { min: estimated[0], max: estimated[1] })}</p>
+      {scriptContent ? (
+        <>
+          {estimated ? (
+            <p className="text-xs text-muted">
+              {t("Estimated Voiceover Duration", { min: estimated[0], max: estimated[1] })}
+            </p>
+          ) : (
+            <p className="text-xs text-muted">{t("Voiceover Script Required")}</p>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            {sampleButton}
+            <Button
+              size="sm"
+              disabled={pending}
+              title={t("Full Voiceover Preview Cost Hint")}
+              onClick={() => synthesize.mutate("full")}
+            >
+              {pending && synthesize.variables === "full" ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <FileText size={14} />
+              )}
+              {t("Generate Full Voiceover Preview")}
+            </Button>
+          </div>
+        </>
       ) : (
-        <p className="text-xs text-muted">{t("Voiceover Script Required")}</p>
+        sampleButton
       )}
-
-      <div className="grid grid-cols-2 gap-2">
-        <Button
-          size="sm"
-          disabled={pending}
-          title={t("Play Voice")}
-          onClick={() => synthesize.mutate("sample")}
-        >
-          {pending && synthesize.variables === "sample" ? (
-            <Loader2 size={14} className="animate-spin" />
-          ) : (
-            <AudioLines size={14} />
-          )}
-          {t("Play Voice")}
-        </Button>
-        <Button
-          size="sm"
-          disabled={pending || !scriptContent}
-          title={t("Full Voiceover Preview Cost Hint")}
-          onClick={() => synthesize.mutate("full")}
-        >
-          {pending && synthesize.variables === "full" ? (
-            <Loader2 size={14} className="animate-spin" />
-          ) : (
-            <FileText size={14} />
-          )}
-          {t("Generate Full Voiceover Preview")}
-        </Button>
-      </div>
 
       {pending && <p className="text-xs text-muted">{t("Synthesizing Voice")}</p>}
       {errorMessage && (

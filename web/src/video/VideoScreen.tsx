@@ -392,7 +392,7 @@ export function VideoScreen() {
                   onChange={(event) => set("video_clip_duration", Number(event.target.value))}
                 />
               </Field>
-              <Field label={t("Video Count")}>
+              <Field label={t("Number of Videos Generated Simultaneously")}>
                 <NumberInput
                   min={1}
                   max={5}
@@ -416,7 +416,7 @@ export function VideoScreen() {
             <Switch
               checked={Boolean(params.match_materials_to_script)}
               onCheckedChange={(value) => set("match_materials_to_script", value)}
-              label={t("Match Materials To Script")}
+              label={t("Match Materials to Script Order")}
             />
 
             <Field label={t("Threads")}>

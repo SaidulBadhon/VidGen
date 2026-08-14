@@ -58,12 +58,15 @@ export function isOcrState(state: BookState | undefined): boolean {
 export type BookSegmentState = "pending" | "queued" | "rendering" | "complete" | "failed";
 export type SegmentMode = "chapter" | "duration" | "smart";
 export type SubtitleRenderMode = "burn" | "soft" | "none";
+/** The AI providers the short-video form offers cannot score a chapter-length segment. */
+export type BookBgmType = "" | "random" | "custom";
 /** `llm` is not produced yet; the filter is structural-only for now. */
 export type DecisionSource = "structural" | "user" | "llm";
 
 export const SEGMENT_MODES: readonly SegmentMode[] = ["chapter", "duration", "smart"];
 export const SUBTITLE_RENDER_MODES: readonly SubtitleRenderMode[] = ["burn", "soft", "none"];
 export const VIDEO_ASPECTS: readonly string[] = ["16:9", "9:16", "1:1"];
+export const BOOK_BGM_TYPES: readonly BookBgmType[] = ["", "random", "custom"];
 
 /**
  * Bounds copied from models/bookSchema.ts.
@@ -92,6 +95,10 @@ export interface BookRenderParams {
   voice_volume: number;
   subtitle_render_mode: SubtitleRenderMode;
   video_aspect: string;
+  /** Absent on books last rendered before background music existed. */
+  bgm_type?: BookBgmType;
+  bgm_file?: string;
+  bgm_volume?: number;
   font_name: string;
   font_size: number;
   text_fore_color: string;
@@ -111,6 +118,9 @@ export interface BookRenderRequest {
   voice_volume?: number;
   subtitle_render_mode?: SubtitleRenderMode;
   video_aspect?: string;
+  bgm_type?: BookBgmType;
+  bgm_file?: string;
+  bgm_volume?: number;
   font_name?: string;
   font_size?: number;
   n_threads?: number;
@@ -199,7 +209,11 @@ export interface BookSegment {
 export interface BookBlock {
   id: string;
   kind: string;
+  /** What will be narrated: the extracted text, or the reviewer's rewrite of it. */
   text: string;
+  /** The extracted text, sent only when a rewrite is replacing it. */
+  original_text: string | null;
+  edited: boolean;
   level: number | null;
   chapter_id: string;
   chapter_title: string;
@@ -211,6 +225,38 @@ export interface BookBlock {
   /** 0..1. Low-confidence drops are the ones worth a second look. */
   confidence: number;
   source: DecisionSource;
+}
+
+/** A block as it appears inside one segment: kept, in narration order, no verdict. */
+export interface SegmentBlock {
+  id: string;
+  kind: string;
+  text: string;
+  original_text: string | null;
+  edited: boolean;
+  level: number | null;
+  chapter_id: string;
+  chapter_title: string;
+  order: number;
+}
+
+export interface SegmentBlocksResult {
+  book_id: string;
+  index: number;
+  title: string;
+  state: BookSegmentState;
+  blocks: SegmentBlock[];
+}
+
+export interface BlockTextResult {
+  book_id: string;
+  block_id: string;
+  text: string;
+  /** False when the submitted text matched the original, which reverts the edit. */
+  edited: boolean;
+  /** The segment marked unrendered by the edit, or null when the block is dropped. */
+  segment_index: number | null;
+  estimated_duration: number | null;
 }
 
 export interface RuleSummary {
@@ -323,6 +369,22 @@ export const bookApi = {
     request<DecisionResult>(bookPath(bookId, `/decisions/${encodeURIComponent(blockId)}`), {
       method: "PATCH",
       body: JSON.stringify({ keep }),
+    }),
+
+  /** The kept blocks of one segment, in the order they will be narrated. */
+  segmentBlocks: (bookId: string, index: number) =>
+    request<SegmentBlocksResult>(bookPath(bookId, `/segments/${index}/blocks`)),
+
+  /**
+   * Rewrites one block's narration.
+   *
+   * Sending the original text back reverts the edit, so no separate endpoint is
+   * needed to undo one. The segment holding the block is marked unrendered.
+   */
+  setBlockText: (bookId: string, blockId: string, text: string) =>
+    request<BlockTextResult>(bookPath(bookId, `/blocks/${encodeURIComponent(blockId)}`), {
+      method: "PATCH",
+      body: JSON.stringify({ text }),
     }),
 
   setSegmentOptions: (bookId: string, options: SegmentOptions) =>

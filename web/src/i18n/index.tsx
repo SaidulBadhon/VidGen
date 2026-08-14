@@ -9,6 +9,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
+import bn from "./locales/bn.json";
 import de from "./locales/de.json";
 import en from "./locales/en.json";
 import es from "./locales/es.json";
@@ -21,11 +22,12 @@ import zh from "./locales/zh.json";
 
 type LocaleFile = { Translation?: Record<string, string> } & Record<string, unknown>;
 
-const RAW_LOCALES: Record<string, LocaleFile> = { de, en, es, id, pt, ru, tr, vi, zh };
+const RAW_LOCALES: Record<string, LocaleFile> = { bn, de, en, es, id, pt, ru, tr, vi, zh };
 
 export const LANGUAGE_NAMES: Record<string, string> = {
   en: "English",
   zh: "简体中文",
+  bn: "বাংলা",
   de: "Deutsch",
   es: "Español",
   id: "Bahasa Indonesia",
@@ -78,6 +80,30 @@ function resolveInitialLanguage(): string {
   return "en";
 }
 
+/**
+ * Translates a key in a named language rather than the one being displayed.
+ *
+ * Most text follows the UI language, but some is spoken or read in a language
+ * the user is not currently reading — a voice sample belongs in the *voice's*
+ * language, not the interface's. The locale files already carry those strings,
+ * so this reads them from there instead of hardcoding a sentence per language.
+ */
+export function translateIn(
+  language: string,
+  key: string,
+  vars?: Record<string, string | number>,
+): string {
+  // Non-English files are incomplete; English backfills them so a missing
+  // translation shows real text rather than a raw key.
+  let value = stripStreamlitMarkup(LOCALES[language]?.[key] ?? LOCALES.en?.[key] ?? key);
+  if (vars) {
+    for (const [name, replacement] of Object.entries(vars)) {
+      value = value.replaceAll(`{${name}}`, String(replacement));
+    }
+  }
+  return value;
+}
+
 interface I18nValue {
   language: string;
   setLanguage: (language: string) => void;
@@ -96,17 +122,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   }, [language]);
 
   const t = useCallback(
-    (key: string, vars?: Record<string, string | number>) => {
-      // Non-English files are incomplete by ~27 keys; English backfills them so
-      // a missing translation shows real text rather than a raw key.
-      let value = stripStreamlitMarkup(LOCALES[language]?.[key] ?? LOCALES.en?.[key] ?? key);
-      if (vars) {
-        for (const [name, replacement] of Object.entries(vars)) {
-          value = value.replaceAll(`{${name}}`, String(replacement));
-        }
-      }
-      return value;
-    },
+    (key: string, vars?: Record<string, string | number>) => translateIn(language, key, vars),
     [language],
   );
 

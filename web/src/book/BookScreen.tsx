@@ -252,6 +252,7 @@ export function BookScreen() {
             bookId={bookId}
             detail={detail}
             progress={live}
+            liveStates={liveStates}
             streamFailed={streamFailed}
             renderingActive={renderingActive}
             onRenderStarted={() => setStreamEpoch((current) => current + 1)}

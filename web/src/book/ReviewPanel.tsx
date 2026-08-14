@@ -97,9 +97,54 @@ export function ReviewPanel({
   const toggle = useMutation({
     mutationFn: (variables: { blockId: string; keep: boolean }) =>
       bookApi.setDecision(bookId, variables.blockId, variables.keep),
+    onMutate: async (variables) => {
+      await queryClient.cancelQueries({ queryKey: blocksKey });
+      const previousBlocks = queryClient.getQueryData<BookBlockPage>(blocksKey);
+      const previousBook = queryClient.getQueryData<BookDetail>(["book", bookId]);
+      const previous = previousBlocks?.blocks.find((block) => block.id === variables.blockId);
+
+      queryClient.setQueryData<BookBlockPage>(blocksKey, (current) =>
+        current
+          ? {
+              ...current,
+              blocks: current.blocks.map((block) =>
+                block.id === variables.blockId
+                  ? {
+                      ...block,
+                      keep: variables.keep,
+                      source: "user" as const,
+                      rule: "user_override",
+                      confidence: 1,
+                      reason: t(variables.keep ? "Book Override Reason Kept" : "Book Override Reason Dropped"),
+                    }
+                  : block,
+              ),
+            }
+          : current,
+      );
+      queryClient.setQueryData<BookDetail>(["book", bookId], (current) => {
+        if (!current) return current;
+        const delta = variables.keep === previous?.keep ? 0 : variables.keep ? 1 : -1;
+        const kept = Math.max(0, current.book.kept_block_count + delta);
+        return {
+          ...current,
+          book: { ...current.book, kept_block_count: kept },
+          decisions: {
+            ...current.decisions,
+            kept,
+            dropped: Math.max(0, current.decisions.total - kept),
+          },
+          overrides: previous?.source === "user" ? current.overrides : current.overrides + 1,
+        };
+      });
+
+      return { previousBlocks, previousBook };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previousBlocks) queryClient.setQueryData(blocksKey, context.previousBlocks);
+      if (context?.previousBook) queryClient.setQueryData(["book", bookId], context.previousBook);
+    },
     onSuccess: (result) => {
-      // Patched in place first so the row and the counters move under the
-      // click; the refetch that follows replaces this with the server's copy.
       queryClient.setQueryData<BookBlockPage>(blocksKey, (current) =>
         current
           ? {
@@ -137,7 +182,6 @@ export function ReviewPanel({
           : current,
       );
       queryClient.invalidateQueries({ queryKey: ["book", bookId] });
-      queryClient.invalidateQueries({ queryKey: ["book-blocks", bookId] });
     },
   });
 
@@ -162,7 +206,7 @@ export function ReviewPanel({
 
   const droppedRules = (detail?.decisions.rules ?? []).filter((rule) => rule.dropped > 0);
   const conflict = toggle.isError && isRenderConflict(toggle.error);
-  const disabled = toggle.isPending || renderingActive;
+  const disabled = renderingActive;
 
   return (
     <div className="space-y-4">
@@ -347,7 +391,7 @@ function BlockRow({
         <button
           type="button"
           aria-pressed={block.keep}
-          disabled={disabled}
+          disabled={disabled || pending}
           onClick={onToggle}
           title={block.keep ? t("Book Drop This Block") : t("Book Keep This Block")}
           className={cn(

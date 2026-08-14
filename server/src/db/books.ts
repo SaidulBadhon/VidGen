@@ -20,11 +20,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  bookBlockEditsCollection,
   bookDecisionsCollection,
   bookSegmentsCollection,
   booksCollection,
 } from "./client.ts";
 import type {
+  BookBlockEditDocument,
   BookDecisionDocument,
   BookDocument,
   BookSegmentDocument,
@@ -59,6 +61,11 @@ export function segmentDocId(bookId: string, index: number): string {
  * `uuid:3:17` into three fields and lose the block.
  */
 export function decisionDocId(bookId: string, blockId: string): string {
+  return `${bookId}:${blockId}`;
+}
+
+/** Composite `_id` for a block text edit. Same shape, different collection. */
+export function blockEditDocId(bookId: string, blockId: string): string {
   return `${bookId}:${blockId}`;
 }
 
@@ -197,6 +204,7 @@ export async function deleteBook(bookId: string): Promise<void> {
     booksCollection().deleteOne({ _id: bookId }),
     bookSegmentsCollection().deleteMany({ book_id: bookId }),
     bookDecisionsCollection().deleteMany({ book_id: bookId }),
+    bookBlockEditsCollection().deleteMany({ book_id: bookId }),
   ]);
 }
 
@@ -329,6 +337,78 @@ export function resolveBookDecisions(
   overrides: BookDecisionDocument[],
 ): FilterDecision[] {
   return mergeDecisions(classifyBlocks(structure), overridesToDecisions(overrides));
+}
+
+// ---------------------------------------------------------------------------
+// Block text edits
+// ---------------------------------------------------------------------------
+
+export async function upsertBlockEdit(
+  bookId: string,
+  blockId: string,
+  text: string,
+): Promise<BookBlockEditDocument> {
+  const document: BookBlockEditDocument = {
+    _id: blockEditDocId(bookId, blockId),
+    book_id: bookId,
+    block_id: blockId,
+    text,
+    updated_at: new Date(),
+  };
+
+  const { _id, ...body } = document;
+  await bookBlockEditsCollection().replaceOne({ _id }, body, { upsert: true });
+  return document;
+}
+
+/** Drops an edit, which restores the extracted text. True when one existed. */
+export async function deleteBlockEdit(bookId: string, blockId: string): Promise<boolean> {
+  const result = await bookBlockEditsCollection().deleteOne({ _id: blockEditDocId(bookId, blockId) });
+  return result.deletedCount > 0;
+}
+
+export async function listBlockEdits(bookId: string): Promise<BookBlockEditDocument[]> {
+  return bookBlockEditsCollection().find({ book_id: bookId }).toArray();
+}
+
+export async function deleteBlockEdits(bookId: string): Promise<void> {
+  await bookBlockEditsCollection().deleteMany({ book_id: bookId });
+}
+
+/**
+ * The book's text as the reviewer has left it: extraction, overlaid with edits.
+ *
+ * Pure, and applied *after* decisions are resolved, never before. Classifying
+ * edited text would let a rewrite silently flip a block from kept to dropped —
+ * a reviewer fixing a typo would watch a paragraph vanish from the plan. So the
+ * rules always see what extraction produced, and only narration, duration
+ * estimates and what the review UI displays see the rewrite.
+ *
+ * Returns `structure` itself when nothing is edited, which is the common case.
+ */
+export function applyBlockEdits(
+  structure: BookStructure,
+  edits: BookBlockEditDocument[],
+): BookStructure {
+  if (edits.length === 0) return structure;
+
+  const byBlockId = new Map(edits.map((edit) => [edit.block_id, edit.text]));
+  return {
+    ...structure,
+    blocks: structure.blocks.map((block) => {
+      const text = byBlockId.get(block.id);
+      return text === undefined || text === block.text ? block : { ...block, text };
+    }),
+  };
+}
+
+/** Reads the structure and its edits together, for every path that narrates. */
+export async function readEditedBookStructure(
+  bookId: string,
+): Promise<{ structure: BookStructure; edited: BookStructure } | null> {
+  const structure = await readBookStructure(bookId);
+  if (!structure) return null;
+  return { structure, edited: applyBlockEdits(structure, await listBlockEdits(bookId)) };
 }
 
 // ---------------------------------------------------------------------------

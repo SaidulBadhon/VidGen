@@ -12,8 +12,10 @@
  */
 
 import { createCanvas, GlobalFonts, type SKRSContext2D } from "@napi-rs/canvas";
-import { basename } from "node:path";
+import { readdirSync } from "node:fs";
+import { basename, join } from "node:path";
 import { logger } from "../../utils/logger.ts";
+import { fontDir } from "../../utils/paths.ts";
 
 // ---------------------------------------------------------------------------
 // Font handling
@@ -413,6 +415,57 @@ export function fontSupportsText(fontPath: string, text: string): boolean {
 
   glyphSupportCache.set(cacheKey, supported);
   return supported;
+}
+
+/**
+ * Substitutes a font that can draw the text when the chosen one cannot.
+ *
+ * The font is picked once in the UI but the script language is picked per task,
+ * and a font missing the script draws blank boxes instead of failing — so a
+ * Bangla or Chinese script under a Latin-only font ships a finished video with
+ * no readable subtitles at all, which is far worse than a substituted typeface.
+ * The requested font always wins when it covers the text; only a font that
+ * cannot is replaced, and the swap is logged so the cause is visible.
+ */
+export function resolveSubtitleFontPath(fontPath: string, text: string): string {
+  if (fontSupportsText(fontPath, text)) return fontPath;
+
+  for (const candidate of fallbackFontCandidates(fontPath)) {
+    if (!fontSupportsText(candidate, text)) continue;
+    logger.warning(
+      `subtitle font ${basename(fontPath)} cannot draw this script; using ${basename(candidate)} instead`,
+    );
+    return candidate;
+  }
+
+  // Nothing bundled covers the text either. Keeping the requested font makes the
+  // rendered result match what the UI said it would use.
+  logger.warning(`no bundled subtitle font can draw this script; keeping ${basename(fontPath)}`);
+  return fontPath;
+}
+
+/**
+ * Bundled fonts to try, minus the one already rejected.
+ *
+ * Faces of the same weight are tried first so a bold subtitle stays bold rather
+ * than thinning out to a regular face of another script.
+ */
+function fallbackFontCandidates(rejected: string): string[] {
+  const isBold = (name: string) => /bold/i.test(name);
+  const wantBold = isBold(basename(rejected));
+
+  let files: string[];
+  try {
+    files = readdirSync(fontDir()).filter((name) => /\.(ttf|ttc|otf)$/i.test(name));
+  } catch (error) {
+    logger.warning(`failed to list bundled subtitle fonts: ${String(error)}`);
+    return [];
+  }
+
+  return files
+    .sort((a, b) => Number(isBold(b) === wantBold) - Number(isBold(a) === wantBold) || a.localeCompare(b))
+    .map((name) => join(fontDir(), name))
+    .filter((path) => path !== rejected);
 }
 
 /** Rasterises one character and hashes the pixels, for glyph comparison. */

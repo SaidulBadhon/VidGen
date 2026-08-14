@@ -13,12 +13,14 @@
 
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createCanvas } from "@napi-rs/canvas";
 
 import {
+  applyBlockEdits,
   getBook,
   getBookSegment,
+  listBlockEdits,
   listDecisionOverrides,
   patchBook,
   patchBookSegment,
@@ -31,6 +33,7 @@ import type { BookDocument, BookRenderParamsDocument } from "../db/types.ts";
 import { TASK_STATE_COMPLETE, TASK_STATE_FAILED, TASK_STATE_PROCESSING } from "../models/const.ts";
 import { aspectToResolution, type VideoAspectValue } from "../models/schema.ts";
 import { videoParamsForBookRender } from "../models/bookSchema.ts";
+import { getBgmFile, shouldUseBgm } from "../services/bgm.ts";
 import { keptBlocks } from "../services/book/filter/decisions.ts";
 import { announcementLines, planBookSegments } from "../services/book/smartSegment.ts";
 import type { Block, BookStructure, FilterDecision, SegmentOptions } from "../services/book/types.ts";
@@ -39,7 +42,7 @@ import { writeSrtFile } from "../services/subtitle/srt.ts";
 import { supportsAssBurn } from "../services/video/capabilities.ts";
 import { muxSoftSubtitles, sidecarSubtitlePath } from "../services/video/softSubs.ts";
 import { renderStillSegment } from "../services/video/still.ts";
-import { registerSubtitleFont } from "../services/video/textRender.ts";
+import { registerSubtitleFont, resolveSubtitleFontPath } from "../services/video/textRender.ts";
 import { synthesizeLongform } from "../services/voice/longform.ts";
 import { errorMessage, logger } from "../utils/logger.ts";
 import { getUuid } from "../utils/misc.ts";
@@ -270,7 +273,9 @@ function renderDefaultCover(
 ): Buffer {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext("2d");
-  const family = registerSubtitleFont(fontFile);
+  // A Bangla or Chinese title under a font that lacks the script would draw a
+  // cover of empty boxes, so the same substitution the subtitles get applies.
+  const family = registerSubtitleFont(resolveSubtitleFontPath(fontFile, `${title} ${author}`));
 
   ctx.fillStyle = COVER_BACKGROUND;
   ctx.fillRect(0, 0, width, height);
@@ -385,8 +390,14 @@ export async function runSegmentRender(
     const segment = await getBookSegment(bookId, index);
     if (!segment) throw new Error(`segment ${index} is no longer part of this book`);
 
-    const decisions = resolveBookDecisions(structure, await listDecisionOverrides(bookId));
-    const blocks = segmentBlocks(structure, decisions, segment.block_ids);
+    const [overrides, edits] = await Promise.all([
+      listDecisionOverrides(bookId),
+      listBlockEdits(bookId),
+    ]);
+    // Filtering runs on the extracted text and narration on the rewritten text,
+    // so a reviewer's edit is spoken without it changing what survives the rules.
+    const decisions = resolveBookDecisions(structure, overrides);
+    const blocks = segmentBlocks(applyBlockEdits(structure, edits), decisions, segment.block_ids);
     const text = segmentNarrationText(
       blocks,
       announcementLines(structure, { index: segment.index, title: segment.title }, blocks),
@@ -452,7 +463,15 @@ export async function runSegmentRender(
     // ffmpeg cannot read and write one file, so a soft mux needs its own input.
     const renderTarget = needsMux ? join(directory, "segment-silent-subs.mp4") : videoFile;
 
-    await renderStillSegment({
+    // Resolved once per segment rather than once per book: "random" is meant to
+    // draw a track, and drawing it here is what lets a re-rendered chapter pick
+    // up a library that has since changed.
+    const bgmPath = shouldUseBgm(params.bgm_type, params.bgm_volume)
+      ? getBgmFile(params.bgm_type ?? "", params.bgm_file ?? "")
+      : "";
+    if (bgmPath) await appendTaskLog(taskId, `mixing background music: ${basename(bgmPath)}`);
+
+    const still = {
       imagePath: coverPath,
       audioPath: audioFile,
       outputFile: renderTarget,
@@ -462,7 +481,20 @@ export async function runSegmentRender(
       fontsDir: assPath ? fontDir() : undefined,
       threads: params.n_threads,
       signal,
-    });
+    };
+
+    try {
+      await renderStillSegment({ ...still, bgmPath, bgmVolume: params.bgm_volume });
+    } catch (error) {
+      // Music fails for reasons the narration survives — a corrupt upload, a
+      // codec this ffmpeg cannot decode. A chapter that took twenty minutes to
+      // synthesise is worth far more than its soundtrack, so it is re-encoded
+      // silent instead of failing. A cancellation is not one of those reasons.
+      if (!bgmPath || signal.aborted) throw error;
+      logger.exception(`failed to mix background music into book segment ${index}: ${bgmPath}`, error);
+      await appendTaskLog(taskId, "background music could not be mixed; rendering narration only");
+      await renderStillSegment(still);
+    }
 
     if (needsMux) {
       await muxSoftSubtitles({

@@ -99,6 +99,21 @@ export const bookDecisionOverrideSchema = z.object({
 });
 export type BookDecisionOverrideRequest = z.infer<typeof bookDecisionOverrideSchema>;
 
+/**
+ * A reviewer's rewrite of one block's narration.
+ *
+ * The ceiling is generous rather than tight: a block is a paragraph in most
+ * books but a whole scanned page in a PDF the OCR pass ran over, and refusing
+ * an edit that is merely long would block the exact case rewriting exists for.
+ * Empty is allowed and means "narrate nothing here" without dropping the block,
+ * which is what a reviewer wants for a stray page number they still want to see
+ * in the review list.
+ */
+export const bookBlockTextSchema = z.object({
+  text: z.string().max(200_000),
+});
+export type BookBlockTextRequest = z.infer<typeof bookBlockTextSchema>;
+
 export const bookPaginationSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   page_size: z.coerce.number().int().min(1).max(500).default(50),
@@ -117,6 +132,17 @@ export type BookPagination = z.infer<typeof bookPaginationSchema>;
  */
 export const SUBTITLE_RENDER_MODES = ["burn", "soft", "none"] as const;
 
+/**
+ * Where a book's background music comes from.
+ *
+ * The short-video form also offers Sonilo and ElevenLabs, and they are left out
+ * here on purpose: both score an *existing video file* they have to be sent,
+ * and both cap it well below a chapter — 360s and 600s against a default
+ * fifteen-minute segment. Offering them would mean encoding every segment
+ * twice and still failing on most of them.
+ */
+export const BOOK_BGM_TYPES = ["", "random", "custom"] as const;
+
 export const bookRenderRequestSchema = z.object({
   voice_name: z.string().min(1),
   voice_rate: z.number().min(0.5).max(2).default(1),
@@ -124,6 +150,13 @@ export const bookRenderRequestSchema = z.object({
 
   subtitle_render_mode: z.enum(SUBTITLE_RENDER_MODES).default("soft"),
   video_aspect: z.enum(["16:9", "9:16", "1:1"]).default("16:9"),
+
+  // Unlike the short-video form this defaults to none rather than "random":
+  // music under hours of narration is a choice, and a book re-rendered after
+  // this shipped must not quietly gain a soundtrack it never had.
+  bgm_type: z.enum(BOOK_BGM_TYPES).default(""),
+  bgm_file: z.string().default(""),
+  bgm_volume: z.number().min(0).max(1).default(0.2),
 
   // Reused verbatim from videoParamsSchema so the ASS writer sees exactly the
   // styling vocabulary it already understands.
@@ -151,6 +184,9 @@ export function renderParamsToDocument(request: BookRenderRequest): BookRenderPa
     voice_volume: request.voice_volume,
     subtitle_render_mode: request.subtitle_render_mode,
     video_aspect: request.video_aspect,
+    bgm_type: request.bgm_type,
+    bgm_file: request.bgm_file,
+    bgm_volume: request.bgm_volume,
     font_name: request.font_name,
     font_size: request.font_size,
     text_fore_color: request.text_fore_color,

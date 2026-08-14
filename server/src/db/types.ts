@@ -162,6 +162,14 @@ export interface BookRenderParamsDocument {
   subtitle_position: string;
   custom_position: number;
   n_threads: number;
+  /**
+   * Background music, absent on books rendered before it existed — which is
+   * why all three are optional: an old book must keep re-rendering silent
+   * rather than acquiring music it was never set up with.
+   */
+  bgm_type?: string;
+  bgm_file?: string;
+  bgm_volume?: number;
 }
 
 /**
@@ -265,5 +273,29 @@ export interface BookDecisionDocument {
   rule: string;
   confidence: number;
   source: DecisionSource;
+  updated_at: Date;
+}
+
+/**
+ * A user's rewrite of one block's narration text.
+ *
+ * Stored the same way a decision override is, and for the same reason:
+ * structure.json is what extraction produced and stays that way, so the
+ * original is always recoverable and a re-extraction of the same file keeps
+ * every edit (block ids are stable). Keyed by block rather than by segment
+ * because segment rows are `${book_id}:${index}` and get replaced wholesale on
+ * every re-plan — an edit hung off one would be lost the next time a reviewer
+ * changed the duration or dropped a paragraph.
+ *
+ * Only the overlay is kept: a block edited back to its original text has its
+ * row deleted rather than stored as a no-op.
+ */
+export interface BookBlockEditDocument {
+  /** `${book_id}:${block_id}`. */
+  _id: string;
+  book_id: string;
+  block_id: string;
+  /** Replaces `Block.text` everywhere the book's text is read. */
+  text: string;
   updated_at: Date;
 }

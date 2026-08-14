@@ -1,29 +1,33 @@
 /**
  * Step 4: narrate and render.
  *
- * Settings are seeded from whatever the book was last rendered with, so a retry
- * after a failure does not mean re-picking a voice; the same shape is what the
- * per-segment retry endpoint reuses server-side.
+ * Settings apply to every clip. The whole book can be queued at once, or any
+ * idle segment on its own — the server already accepts a subset, the form just
+ * has to send it. A later retry without a body reuses whatever was stored here.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Image as ImageIcon, Loader2, Play, RotateCw, Upload } from "lucide-react";
 import { api } from "../api/client.ts";
+import { BgmPreview, VoicePreview } from "../components/AudioPreview.tsx";
 import { useI18n } from "../i18n/index.tsx";
 import { Alert, Badge, Button, Card, Field, NumberInput, Progress, Select, Slider } from "../components/ui.tsx";
 import {
   ACCEPTED_COVER_EXTENSIONS,
+  BOOK_BGM_TYPES,
   SUBTITLE_RENDER_MODES,
   VIDEO_ASPECTS,
   bookApi,
   errorText,
   formatDuration,
   isRenderConflict,
+  type BookBgmType,
   type BookDetail,
   type BookEvent,
   type BookLogLine,
   type BookRenderRequest,
+  type BookSegmentState,
   type SubtitleRenderMode,
 } from "./api.ts";
 
@@ -38,6 +42,11 @@ const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   voice_volume: 1,
   subtitle_render_mode: "soft",
   video_aspect: "16:9",
+  // No music by default: an audiobook is narration first, and the server
+  // defaults the same way so an old book keeps rendering as it always did.
+  bgm_type: "",
+  bgm_file: "",
+  bgm_volume: 0.2,
   font_name: "",
   font_size: 48,
   n_threads: 2,
@@ -45,10 +54,18 @@ const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
 
 type RenderForm = typeof DEFAULT_FORM;
 
+function stateTone(state: BookSegmentState): "muted" | "success" | "warning" | "danger" | "accent" {
+  if (state === "complete") return "success";
+  if (state === "failed") return "danger";
+  if (state === "rendering" || state === "queued") return "accent";
+  return "muted";
+}
+
 export function RenderPanel({
   bookId,
   detail,
   progress,
+  liveStates,
   streamFailed,
   renderingActive,
   onRenderStarted,
@@ -56,6 +73,7 @@ export function RenderPanel({
   bookId: string;
   detail?: BookDetail;
   progress: BookEvent | null;
+  liveStates: Record<number, BookSegmentState> | null;
   streamFailed: boolean;
   renderingActive: boolean;
   onRenderStarted: () => void;
@@ -70,6 +88,7 @@ export function RenderPanel({
 
   const metadata = useQuery({ queryKey: ["settings-metadata"], queryFn: api.getSettingsMetadata });
   const voices = useQuery({ queryKey: ["voices", ttsServer], queryFn: () => api.listVoices(ttsServer) });
+  const musics = useQuery({ queryKey: ["musics"], queryFn: api.listMusics });
 
   // Seeded once per stored settings change; a background refetch of the book
   // must not overwrite half-adjusted sliders.
@@ -89,6 +108,11 @@ export function RenderPanel({
       voice_volume: stored.voice_volume,
       subtitle_render_mode: stored.subtitle_render_mode,
       video_aspect: stored.video_aspect,
+      // A book rendered before music existed stores none of these, and must
+      // come back as "no music" rather than as the form's own defaults.
+      bgm_type: stored.bgm_type ?? "",
+      bgm_file: stored.bgm_file ?? "",
+      bgm_volume: stored.bgm_volume ?? DEFAULT_FORM.bgm_volume,
       font_name: stored.font_name,
       font_size: stored.font_size,
       n_threads: stored.n_threads,
@@ -100,25 +124,30 @@ export function RenderPanel({
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["book", bookId] }),
   });
 
-  const startRender = useMutation({
-    mutationFn: () => {
-      const body: BookRenderRequest = { ...form };
-      // An empty font means "whatever the server defaults to"; sending "" would
-      // be taken as a real font name and fail at the ASS writer.
-      if (!body.font_name) delete body.font_name;
-      return bookApi.render(bookId, body);
-    },
-    onSuccess: () => {
-      onRenderStarted();
-      queryClient.invalidateQueries({ queryKey: ["book", bookId] });
+  const uploadMusic = useMutation({
+    mutationFn: (file: File) => api.uploadMusic(file),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["musics"] });
+      // Uploading is only ever done to use the track, so selecting it here
+      // saves hunting for it in a list that may hold dozens of files.
+      if (result?.file) setForm((current) => ({ ...current, bgm_type: "custom", bgm_file: result.file }));
     },
   });
 
-  // A retry reuses the settings stored on the book, which is what the endpoint
-  // falls back to with no body — so one failed chapter does not mean re-picking
-  // a voice for the other sixty-three.
-  const retrySegment = useMutation({
-    mutationFn: (index: number) => bookApi.renderSegment(bookId, index),
+  const buildBody = (): BookRenderRequest => {
+    const body: BookRenderRequest = { ...form };
+    // An empty font means "whatever the server defaults to"; sending "" would
+    // be taken as a real font name and fail at the ASS writer.
+    if (!body.font_name) delete body.font_name;
+    return body;
+  };
+
+  const startRender = useMutation({
+    mutationFn: (indexes?: number[]) => {
+      const body = buildBody();
+      if (indexes) body.segment_indexes = indexes;
+      return bookApi.render(bookId, body);
+    },
     onSuccess: () => {
       onRenderStarted();
       queryClient.invalidateQueries({ queryKey: ["book", bookId] });
@@ -224,6 +253,81 @@ export function RenderPanel({
                 format={(value) => value.toFixed(2)}
               />
             </Field>
+            <VoicePreview
+              voiceName={form.voice_name}
+              voiceRate={form.voice_rate}
+              voiceVolume={form.voice_volume}
+            />
+
+            <hr className="border-border" />
+
+            <Field label={t("Background Music")} hint={t("Book Music Hint")}>
+              <Select
+                value={form.bgm_type}
+                onValueChange={(value) => set("bgm_type", value as BookBgmType)}
+                options={BOOK_BGM_TYPES.map((type) => ({
+                  value: type,
+                  label: t(`Book Music ${type || "none"}`),
+                }))}
+              />
+            </Field>
+
+            {form.bgm_type === "custom" && (
+              <div className="space-y-2">
+                <Select
+                  value={form.bgm_file}
+                  onValueChange={(value) => set("bgm_file", value)}
+                  options={(musics.data?.files ?? []).map((file) => ({ value: file.file, label: file.name }))}
+                  placeholder={musics.isLoading ? t("Loading") : t("Select Background Music")}
+                />
+                <label className="cursor-pointer">
+                  <input
+                    type="file"
+                    className="hidden"
+                    accept=".mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.wma"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) uploadMusic.mutate(file);
+                      event.target.value = "";
+                    }}
+                  />
+                  <span className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                    {uploadMusic.isPending ? (
+                      <Loader2 className="animate-spin" size={12} />
+                    ) : (
+                      <Upload size={12} />
+                    )}
+                    {t("Upload Background Music")}
+                  </span>
+                </label>
+                {uploadMusic.isError && <Alert tone="danger">{errorText(uploadMusic.error, t)}</Alert>}
+                {/* The server treats an unpicked track as no music. On a
+                    sixty-second clip that is obvious; on a book it is hours of
+                    rendering before anyone finds out. */}
+                {!form.bgm_file && <Alert tone="warning">{t("Book Music Pick Required")}</Alert>}
+              </div>
+            )}
+
+            {form.bgm_type !== "" && (
+              <>
+                <Field label={t("Background Music Volume")}>
+                  <Slider
+                    value={form.bgm_volume}
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    onValueChange={(value) => set("bgm_volume", value)}
+                    format={(value) => value.toFixed(2)}
+                  />
+                </Field>
+                <BgmPreview
+                  bgmType={form.bgm_type}
+                  bgmFile={form.bgm_file}
+                  bgmVolume={form.bgm_volume}
+                  files={musics.data?.files ?? []}
+                />
+              </>
+            )}
           </div>
         </Card>
 
@@ -311,7 +415,7 @@ export function RenderPanel({
             disabled={
               segments.length === 0 || !form.voice_name || startRender.isPending || renderingActive
             }
-            onClick={() => startRender.mutate()}
+            onClick={() => startRender.mutate(undefined)}
           >
             {startRender.isPending || renderingActive ? (
               <Loader2 className="animate-spin" size={18} />
@@ -330,6 +434,71 @@ export function RenderPanel({
             <Alert tone="success">
               {t("Book Render Queued", { count: startRender.data.accepted.length })}
             </Alert>
+          )}
+
+          {segments.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs text-muted">{t("Book Render One Hint")}</p>
+              <div className="scroll-x">
+                <table className="w-full min-w-[520px] border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left text-xs text-muted">
+                      <th className="pb-2 pr-3 font-medium">#</th>
+                      <th className="pb-2 pr-3 font-medium">{t("Book Segment Title")}</th>
+                      <th className="pb-2 pr-3 font-medium">{t("Book Estimated Duration")}</th>
+                      <th className="pb-2 pr-3 font-medium">{t("Task Status")}</th>
+                      <th className="pb-2 font-medium">{t("Task Actions")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {segments.map((segment) => {
+                      const state = liveStates?.[segment.index] ?? segment.state;
+                      const busy = state === "queued" || state === "rendering";
+                      const again = state === "complete" || state === "failed";
+                      const posting = startRender.isPending && startRender.variables?.[0] === segment.index;
+                      return (
+                        <tr key={segment._id} className="border-b border-border/60 last:border-0">
+                          <td className="py-2 pr-3 align-middle tabular-nums text-muted">
+                            {segment.index + 1}
+                          </td>
+                          <td className="py-2 pr-3 align-middle" title={segment.title}>
+                            <span className="line-clamp-2">{segment.title || t("Book Untitled Segment")}</span>
+                            {segment.error && (
+                              <div className="text-xs text-danger" title={segment.error}>
+                                <span className="line-clamp-2">{segment.error}</span>
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2 pr-3 align-middle tabular-nums whitespace-nowrap">
+                            {formatDuration(segment.estimated_duration)}
+                          </td>
+                          <td className="py-2 pr-3 align-middle">
+                            <Badge tone={stateTone(state)}>{t(`Book Segment State ${state}`)}</Badge>
+                          </td>
+                          <td className="py-2 align-middle">
+                            <Button
+                              size="sm"
+                              disabled={busy || !form.voice_name || startRender.isPending}
+                              title={again ? t("Book Retry Segment") : t("Book Render Segment")}
+                              onClick={() => startRender.mutate([segment.index])}
+                            >
+                              {busy || posting ? (
+                                <Loader2 className="animate-spin" size={14} />
+                              ) : again ? (
+                                <RotateCw size={14} />
+                              ) : (
+                                <Play size={14} />
+                              )}
+                              {again ? t("Book Retry") : t("Book Render One")}
+                            </Button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       </Card>
@@ -392,10 +561,10 @@ export function RenderPanel({
                     <Button
                       size="sm"
                       title={t("Book Retry Segment")}
-                      disabled={retrySegment.isPending || !detail?.book.render_params}
-                      onClick={() => retrySegment.mutate(segment.index)}
+                      disabled={startRender.isPending || !form.voice_name}
+                      onClick={() => startRender.mutate([segment.index])}
                     >
-                      {retrySegment.isPending ? (
+                      {startRender.isPending && startRender.variables?.[0] === segment.index ? (
                         <Loader2 className="animate-spin" size={14} />
                       ) : (
                         <RotateCw size={14} />
@@ -404,10 +573,6 @@ export function RenderPanel({
                     </Button>
                   </div>
                 ))}
-                {!detail?.book.render_params && (
-                  <p className="text-xs text-muted">{t("Book Retry Needs Render")}</p>
-                )}
-                {retrySegment.isError && <Alert tone="danger">{errorText(retrySegment.error, t)}</Alert>}
               </div>
             )}
 

@@ -24,6 +24,8 @@ import {
 } from "../src/models/bookSchema.ts";
 import {
   aggregateSegmentProgress,
+  applyBlockEdits,
+  blockEditDocId,
   decisionDocId,
   overridesToDecisions,
   parseDecisionDocId,
@@ -38,10 +40,11 @@ import {
   segmentNarrationText,
   shouldCommitSegmentResult,
 } from "../src/tasks/bookPipeline.ts";
+import { shouldUseBgm } from "../src/services/bgm.ts";
 import { detectImageFormat } from "../src/routes/v1/book.ts";
 import { DEFAULT_SEGMENT_OPTIONS } from "../src/services/book/types.ts";
 import type { Block, BookStructure } from "../src/services/book/types.ts";
-import type { BookDecisionDocument, BookSegmentState } from "../src/db/types.ts";
+import type { BookBlockEditDocument, BookDecisionDocument, BookSegmentState } from "../src/db/types.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -99,6 +102,16 @@ function override(blockId: string, keep: boolean): BookDecisionDocument {
 
 function segments(...states: BookSegmentState[]): { state: BookSegmentState }[] {
   return states.map((state) => ({ state }));
+}
+
+function edit(blockId: string, text: string): BookBlockEditDocument {
+  return {
+    _id: blockEditDocId("book-1", blockId),
+    book_id: "book-1",
+    block_id: blockId,
+    text,
+    updated_at: new Date(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +274,38 @@ describe("bookRenderRequestSchema", () => {
     expect(parsed.segment_indexes).toEqual([0, 4, 9]);
     expect(() => bookRenderRequestSchema.parse({ voice_name: "v", segment_indexes: [-1] })).toThrow();
   });
+
+  test("defaults to no background music, unlike the short-video form", () => {
+    // A book re-rendered after music shipped must sound as it always did.
+    const parsed = bookRenderRequestSchema.parse({ voice_name: "v" });
+    expect(parsed.bgm_type).toBe("");
+    expect(parsed.bgm_volume).toBe(0.2);
+    expect(shouldUseBgm(parsed.bgm_type, parsed.bgm_volume)).toBe(false);
+  });
+
+  test("carries a music choice through to the stored render params", () => {
+    const params = renderParamsToDocument(
+      bookRenderRequestSchema.parse({
+        voice_name: "v",
+        bgm_type: "custom",
+        bgm_file: "calm.mp3",
+        bgm_volume: 0.15,
+      }),
+    );
+    expect(params.bgm_type).toBe("custom");
+    expect(params.bgm_file).toBe("calm.mp3");
+    expect(params.bgm_volume).toBe(0.15);
+    expect(shouldUseBgm(params.bgm_type, params.bgm_volume)).toBe(true);
+  });
+
+  test("rejects the AI providers, which cannot score a chapter-length segment", () => {
+    // Both take an existing video and cap it below one segment, so a silent
+    // acceptance would promise music that could never be generated.
+    const base = { voice_name: "v" };
+    expect(() => bookRenderRequestSchema.parse({ ...base, bgm_type: "sonilo" })).toThrow();
+    expect(() => bookRenderRequestSchema.parse({ ...base, bgm_type: "elevenlabs" })).toThrow();
+    expect(() => bookRenderRequestSchema.parse({ ...base, bgm_volume: 4 })).toThrow();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -414,6 +459,93 @@ describe("resolveBookDecisions", () => {
       confidence: 1,
       source: "user",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Block text edits
+// ---------------------------------------------------------------------------
+
+describe("applyBlockEdits", () => {
+  test("replaces the text of an edited block and leaves the rest alone", () => {
+    const structure = smallBook();
+    const edited = applyBlockEdits(structure, [edit("0:2", "The harbour was loud that morning.")]);
+
+    expect(edited.blocks.find((b) => b.id === "0:2")?.text).toBe("The harbour was loud that morning.");
+    expect(edited.blocks.find((b) => b.id === "0:3")?.text).toBe(
+      "She counted the boats twice before leaving.",
+    );
+  });
+
+  test("never mutates the structure it was given, so the original stays recoverable", () => {
+    const structure = smallBook();
+    applyBlockEdits(structure, [edit("0:2", "Rewritten.")]);
+    expect(structure.blocks.find((b) => b.id === "0:2")?.text).toBe(
+      "The harbour was quiet that morning.",
+    );
+  });
+
+  test("returns the same object when there is nothing to overlay", () => {
+    const structure = smallBook();
+    expect(applyBlockEdits(structure, [])).toBe(structure);
+  });
+
+  test("ignores an edit for a block the book no longer has", () => {
+    const structure = smallBook();
+    const edited = applyBlockEdits(structure, [edit("9:9", "Orphaned by a re-extraction.")]);
+    expect(edited.blocks.map((b) => b.text)).toEqual(structure.blocks.map((b) => b.text));
+  });
+
+  test("keeps everything else about a block, so ordering and kind survive a rewrite", () => {
+    const structure = smallBook();
+    const edited = applyBlockEdits(structure, [edit("0:0", "Chapter the First")]);
+    const heading = edited.blocks.find((b) => b.id === "0:0");
+
+    expect(heading).toMatchObject({ kind: "heading", level: 1, order: 0, chapterId: "ch-0" });
+  });
+
+  test("an edit cannot change what survives filtering", () => {
+    // The whole reason decisions are resolved from the extracted structure: a
+    // reviewer expanding the bare page number "17" into a sentence must not
+    // have it silently promoted into the narration, and rewording real prose
+    // into something that looks like a page number must not delete it.
+    const structure = smallBook();
+    const edited = applyBlockEdits(structure, [
+      edit("0:1", "Seventeen boats lay at anchor."),
+      edit("0:2", "17"),
+    ]);
+    const decisions = resolveBookDecisions(structure, []);
+
+    expect(segmentBlocks(edited, decisions, ["0:1", "0:2"]).map((b) => b.id)).toEqual(["0:2"]);
+  });
+
+  test("narration speaks the rewrite, not what extraction produced", () => {
+    const structure = smallBook();
+    const edited = applyBlockEdits(structure, [edit("0:2", "The harbour was loud that morning.")]);
+    const decisions = resolveBookDecisions(structure, []);
+
+    expect(segmentNarrationText(segmentBlocks(edited, decisions, ["0:2"]))).toBe(
+      "The harbour was loud that morning.",
+    );
+  });
+
+  test("a rewrite lengthens the estimate its segment is planned with", async () => {
+    const structure = smallBook();
+    const decisions = resolveBookDecisions(structure, []);
+    const options = segmentOptionsFromDocument(segmentOptionsToDocument(bookSegmentOptionsSchema.parse({})));
+
+    const before = await buildSegmentUpserts("book-1", structure, decisions, options, 1);
+    const after = await buildSegmentUpserts(
+      "book-1",
+      applyBlockEdits(structure, [edit("0:2", `${"a much longer retelling ".repeat(200)}`)]),
+      decisions,
+      options,
+      1,
+    );
+
+    const total = (rows: { estimated_duration: number }[]) =>
+      rows.reduce((sum, row) => sum + row.estimated_duration, 0);
+    expect(total(after)).toBeGreaterThan(total(before));
   });
 });
 

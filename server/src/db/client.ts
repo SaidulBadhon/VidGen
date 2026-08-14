@@ -9,6 +9,7 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { logger } from "../utils/logger.ts";
 import type {
+  BookBlockEditDocument,
   BookDecisionDocument,
   BookDocument,
   BookSegmentDocument,
@@ -50,6 +51,10 @@ async function createIndexes(database: Db): Promise<void> {
   ]);
 
   await database.collection<BookDecisionDocument>("book_decisions").createIndexes([
+    { key: { book_id: 1 }, name: "book_id" },
+  ]);
+
+  await database.collection<BookBlockEditDocument>("book_block_edits").createIndexes([
     { key: { book_id: 1 }, name: "book_id" },
   ]);
 }
@@ -121,6 +126,10 @@ export function bookSegmentsCollection(): Collection<BookSegmentDocument> {
 
 export function bookDecisionsCollection(): Collection<BookDecisionDocument> {
   return requireDb().collection<BookDecisionDocument>("book_decisions");
+}
+
+export function bookBlockEditsCollection(): Collection<BookBlockEditDocument> {
+  return requireDb().collection<BookBlockEditDocument>("book_block_edits");
 }
 
 export function isConnected(): boolean {

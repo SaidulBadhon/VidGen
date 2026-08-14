@@ -16,7 +16,14 @@ import { buildClipFilterGraph, buildFitFilter } from "../src/services/video/clip
 import { buildTransitionGraph, pickSlideSide, resolveTransition } from "../src/services/video/transitions.ts";
 import { formatConcatPath } from "../src/services/video/concat.ts";
 import { buildOverlayChain, resolveSubtitleY } from "../src/services/video/generate.ts";
-import { hexToRgb, resolveBackgroundColor, wrapText, registerSubtitleFont } from "../src/services/video/textRender.ts";
+import {
+  fontSupportsText,
+  hexToRgb,
+  registerSubtitleFont,
+  resolveBackgroundColor,
+  resolveSubtitleFontPath,
+  wrapText,
+} from "../src/services/video/textRender.ts";
 import { aspectToResolution } from "../src/models/schema.ts";
 import { fontDir } from "../src/utils/paths.ts";
 import { join } from "node:path";
@@ -293,5 +300,54 @@ describe("wrapText", () => {
     for (const line of result.lines.slice(1)) {
       expect("，。！？；：、".includes(line[0]!)).toBe(false);
     }
+  });
+
+  test("wraps Bangla on word boundaries, keeping conjuncts intact", () => {
+    const result = wrapText("আজকের ভিডিওতে আমরা শিখব কীভাবে বিজ্ঞান কাজ করে", 600, family, 60);
+    expect(result.lines.length).toBeGreaterThan(1);
+    expect(result.lines.join(" ").replace(/\s+/g, " ")).toBe(
+      "আজকের ভিডিওতে আমরা শিখব কীভাবে বিজ্ঞান কাজ করে",
+    );
+  });
+});
+
+describe("fontSupportsText", () => {
+  const bangla = join(fontDir(), "NotoSansBengali-Bold.ttf");
+  const cjk = join(fontDir(), "MicrosoftYaHeiBold.ttc");
+
+  test("accepts a font that covers the script", () => {
+    expect(fontSupportsText(bangla, "শিক্ষা ও বিজ্ঞান")).toBe(true);
+  });
+
+  test("rejects a font missing the script, which would draw blank boxes", () => {
+    expect(fontSupportsText(cjk, "শিক্ষা ও বিজ্ঞান")).toBe(false);
+  });
+
+  test("requires Latin and digits too, since Bangla scripts mix them in", () => {
+    expect(fontSupportsText(bangla, "VidGen 2026")).toBe(true);
+  });
+
+  test("ignores text with nothing to draw", () => {
+    expect(fontSupportsText(cjk, "  —  ")).toBe(true);
+  });
+});
+
+describe("resolveSubtitleFontPath", () => {
+  const bangla = join(fontDir(), "NotoSansBengali-Bold.ttf");
+  const cjk = join(fontDir(), "MicrosoftYaHeiBold.ttc");
+
+  test("keeps the requested font when it can draw the text", () => {
+    expect(resolveSubtitleFontPath(cjk, "春天的花海")).toBe(cjk);
+    expect(resolveSubtitleFontPath(bangla, "শিক্ষা")).toBe(bangla);
+  });
+
+  test("substitutes a Bangla-capable font rather than rendering empty boxes", () => {
+    const resolved = resolveSubtitleFontPath(cjk, "আজকের ভিডিওতে আমরা শিখব");
+    expect(resolved).not.toBe(cjk);
+    expect(fontSupportsText(resolved, "আজকের ভিডিওতে আমরা শিখব")).toBe(true);
+  });
+
+  test("keeps the requested weight when substituting", () => {
+    expect(resolveSubtitleFontPath(cjk, "বিজ্ঞান")).toContain("Bold");
   });
 });

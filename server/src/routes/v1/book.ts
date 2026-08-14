@@ -20,21 +20,26 @@ import { extname, join, relative } from "node:path";
 
 import { appConfig } from "../../config/settings.ts";
 import {
+  applyBlockEdits,
   bookDir,
   bookProgress,
   createBook,
+  deleteBlockEdit,
   deleteBook,
   deleteBookFiles,
   getBook,
   getBookSegment,
+  listBlockEdits,
   listBookSegments,
   listBooks,
   listDecisionOverrides,
   patchBook,
+  patchBookSegment,
   readBookStructure,
   replaceBookSegments,
   resolveBookDecisions,
   syncBookState,
+  upsertBlockEdit,
   upsertDecisionOverride,
   writeBookStructure,
   bumpBookRevision,
@@ -45,6 +50,7 @@ import type { BookDocument, BookSegmentDocument } from "../../db/types.ts";
 import { badRequest, conflict, notFound } from "../../http/errors.ts";
 import { serveFileWithRange } from "../../http/staticFiles.ts";
 import {
+  bookBlockTextSchema,
   bookDecisionOverrideSchema,
   bookPaginationSchema,
   bookRenderRequestSchema,
@@ -63,7 +69,9 @@ import {
   bookGateStats,
   buildSegmentUpserts,
   renderBookSegments,
+  segmentBlocks,
 } from "../../tasks/bookPipeline.ts";
+import { estimateSpokenSeconds } from "../../services/book/segment.ts";
 import { ocrSourcePath, startBookOcr } from "../../tasks/ocrPipeline.ts";
 import { taskQueue } from "../../tasks/queue.ts";
 import { deleteTask, getRecentTaskLogs, getTask } from "../../tasks/state.ts";
@@ -572,19 +580,30 @@ bookRouter.get("/books/:id/blocks", async (c) => {
   const structure = await readBookStructure(bookId);
   if (!structure) throw notFound("the extracted book structure is missing", bookId);
 
-  const decisions = resolveBookDecisions(structure, await listDecisionOverrides(bookId));
+  const [overrides, edits] = await Promise.all([
+    listDecisionOverrides(bookId),
+    listBlockEdits(bookId),
+  ]);
+  // Decisions come from the extracted text, the listing from the edited text:
+  // a rewrite must never re-run the rules and change what survives filtering.
+  const decisions = resolveBookDecisions(structure, overrides);
   const byBlockId = new Map(decisions.map((decision) => [decision.blockId, decision]));
+  const originalText = new Map(structure.blocks.map((block) => [block.id, block.text]));
 
-  const ordered = [...structure.blocks].sort((a, b) => a.order - b.order);
+  const ordered = [...applyBlockEdits(structure, edits).blocks].sort((a, b) => a.order - b.order);
   const skip = (page - 1) * pageSize;
   const chapterTitles = new Map(structure.chapters.map((chapter) => [chapter.id, chapter.title]));
 
   const blocks = ordered.slice(skip, skip + pageSize).map((block) => {
     const decision = byBlockId.get(block.id);
+    const original = originalText.get(block.id) ?? block.text;
     return {
       id: block.id,
       kind: block.kind,
       text: block.text,
+      // Sent only when it differs, so an unedited book pays nothing for the field.
+      original_text: original === block.text ? null : original,
+      edited: original !== block.text,
       level: block.level ?? null,
       chapter_id: block.chapterId,
       chapter_title: chapterTitles.get(block.chapterId) ?? "",
@@ -602,20 +621,132 @@ bookRouter.get("/books/:id/blocks", async (c) => {
   );
 });
 
+/**
+ * The blocks of one segment, in narration order, with their edits applied.
+ *
+ * The segments screen needs the text a segment will actually narrate, which is
+ * neither a page of the book-wide block list nor anything stored on the segment
+ * row: the row holds block ids, and dropped blocks are filtered out at render
+ * time. This endpoint answers the same question the renderer asks.
+ */
+bookRouter.get("/books/:id/segments/:index/blocks", async (c) => {
+  const bookId = c.req.param("id");
+  const index = Number(c.req.param("index"));
+  if (!Number.isInteger(index) || index < 0) {
+    throw badRequest("segment index must be a non-negative integer", bookId);
+  }
+
+  await requireBook(bookId);
+  const segment = await getBookSegment(bookId, index);
+  if (!segment) throw notFound("segment not found", bookId);
+
+  const structure = await readBookStructure(bookId);
+  if (!structure) throw notFound("the extracted book structure is missing", bookId);
+
+  const [overrides, edits] = await Promise.all([
+    listDecisionOverrides(bookId),
+    listBlockEdits(bookId),
+  ]);
+  const decisions = resolveBookDecisions(structure, overrides);
+  const editedById = new Map(applyBlockEdits(structure, edits).blocks.map((block) => [block.id, block]));
+  const chapterTitles = new Map(structure.chapters.map((chapter) => [chapter.id, chapter.title]));
+
+  const blocks = segmentBlocks(structure, decisions, segment.block_ids).map((block) => {
+    const edited = editedById.get(block.id) ?? block;
+    return {
+      id: block.id,
+      kind: block.kind,
+      text: edited.text,
+      original_text: edited.text === block.text ? null : block.text,
+      edited: edited.text !== block.text,
+      level: block.level ?? null,
+      chapter_id: block.chapterId,
+      chapter_title: chapterTitles.get(block.chapterId) ?? "",
+      order: block.order,
+    };
+  });
+
+  return c.json(
+    getResponse(200, {
+      book_id: bookId,
+      index,
+      title: segment.title,
+      state: segment.state,
+      blocks,
+    }),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Review edits
 // ---------------------------------------------------------------------------
+
+/**
+ * Rebuilds the segment plan after a pause in review clicks.
+ *
+ * A keep/drop used to wait on this on the request path, which made toggling one
+ * copyright line feel like re-importing the book: the structure is re-read, every
+ * segment is rewritten, and the output folder is wiped. Reviewers click many
+ * times in a row, so the work is coalesced and run after they pause. Narration
+ * already re-filters dropped blocks at render time, so a brief stale plan cannot
+ * put rejected text back into a video.
+ */
+const REPLAN_DEBOUNCE_MS = 600;
+const replanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const replanTail = new Map<string, Promise<void>>();
+
+function scheduleBookReplan(bookId: string): void {
+  const pending = replanTimers.get(bookId);
+  if (pending) clearTimeout(pending);
+  replanTimers.set(
+    bookId,
+    setTimeout(() => {
+      replanTimers.delete(bookId);
+      const previous = replanTail.get(bookId) ?? Promise.resolve();
+      const next = previous.catch(() => undefined).then(() => runScheduledReplan(bookId));
+      replanTail.set(bookId, next);
+      void next.finally(() => {
+        if (replanTail.get(bookId) === next) replanTail.delete(bookId);
+      });
+    }, REPLAN_DEBOUNCE_MS),
+  );
+}
+
+async function runScheduledReplan(bookId: string): Promise<void> {
+  const book = await getBook(bookId);
+  if (!book) return;
+
+  const segments = await listBookSegments(bookId);
+  if (segments.some((segment) => ACTIVE_SEGMENT_STATES.has(segment.state))) {
+    logger.info(`skipping background replan while rendering: ${bookId}`);
+    return;
+  }
+
+  try {
+    await replanBook(book, book.revision);
+    logger.info(`background replan finished: ${bookId}, revision: ${book.revision}`);
+  } catch (error) {
+    logger.exception(`background replan failed: ${bookId}`, error);
+  }
+}
 
 /** Re-plans from the current decisions and stamps the new revision. */
 async function replanBook(book: BookDocument, revision: number): Promise<number> {
   const structure = await readBookStructure(book._id);
   if (!structure) throw notFound("the extracted book structure is missing", book._id);
 
-  const decisions = resolveBookDecisions(structure, await listDecisionOverrides(book._id));
-  const kept = keptBlocks(structure, decisions);
+  const [overrides, edits] = await Promise.all([
+    listDecisionOverrides(book._id),
+    listBlockEdits(book._id),
+  ]);
+  // Rules see the extracted text, the planner sees the rewritten text: a longer
+  // rewrite must lengthen its segment's estimate without changing what is kept.
+  const decisions = resolveBookDecisions(structure, overrides);
+  const edited = applyBlockEdits(structure, edits);
+  const kept = keptBlocks(edited, decisions);
   const segments = await buildSegmentUpserts(
     book._id,
-    structure,
+    edited,
     decisions,
     segmentOptionsFromDocument(book.segment_options),
     revision,
@@ -633,7 +764,7 @@ async function replanBook(book: BookDocument, revision: number): Promise<number>
 bookRouter.patch("/books/:id/decisions/:blockId", async (c) => {
   const bookId = c.req.param("id");
   const blockId = c.req.param("blockId");
-  const book = await requireBook(bookId);
+  await requireBook(bookId);
   const body = bookDecisionOverrideSchema.parse(await c.req.json().catch(() => ({})));
 
   const structure = await readBookStructure(bookId);
@@ -656,13 +787,14 @@ bookRouter.patch("/books/:id/decisions/:blockId", async (c) => {
     source: "user",
   });
 
-  // Kept blocks changed, so the plan built from them is stale. Re-planning here
-  // rather than lazily is what keeps segments and decisions from ever
-  // disagreeing about what the book contains.
-  const revision = await bumpBookRevision(bookId);
+  // The override is the source of truth; the segment plan is rebuilt in the
+  // background so this click is a write, not a full re-segmentation.
+  const overrides = await listDecisionOverrides(bookId);
+  const keptCount = keptBlocks(structure, resolveBookDecisions(structure, overrides)).length;
+  const revision = await bumpBookRevision(bookId, { kept_block_count: keptCount });
   if (revision === null) throw notFound("book not found", bookId);
 
-  const keptCount = await replanBook(book, revision);
+  scheduleBookReplan(bookId);
   return c.json(
     getResponse(200, {
       book_id: bookId,
@@ -671,6 +803,93 @@ bookRouter.patch("/books/:id/decisions/:blockId", async (c) => {
       revision,
       kept_block_count: keptCount,
       segments: (await listBookSegments(bookId)).length,
+    }),
+  );
+});
+
+/**
+ * Rewrites one block's narration text.
+ *
+ * Deliberately does *not* re-plan. A re-plan replaces every segment row, which
+ * would throw away the renders of the other 299 segments because a reviewer
+ * fixed a word in one of them; and since block ids are stable, the grouping the
+ * plan describes is still correct after an edit. What does change is the
+ * affected segment's estimate — and its video, which no longer matches its
+ * text — so that one segment is recosted and marked unrendered, and the
+ * reviewer re-renders it when they are ready.
+ */
+bookRouter.patch("/books/:id/blocks/:blockId", async (c) => {
+  const bookId = c.req.param("id");
+  const blockId = c.req.param("blockId");
+  const book = await requireBook(bookId);
+  const body = bookBlockTextSchema.parse(await c.req.json().catch(() => ({})));
+
+  const structure = await readBookStructure(bookId);
+  if (!structure) throw notFound("the extracted book structure is missing", bookId);
+
+  const original = structure.blocks.find((block) => block.id === blockId);
+  if (!original) throw notFound("block not found in this book", bookId);
+
+  const segments = await listBookSegments(bookId);
+  requireIdleSegments(bookId, segments);
+
+  // Storing an edit identical to the extracted text would leave a row claiming
+  // the block was rewritten, and the review UI would badge it forever.
+  const reverted = body.text === original.text;
+  if (reverted) await deleteBlockEdit(bookId, blockId);
+  else await upsertBlockEdit(bookId, blockId, body.text);
+
+  const target = segments.find((segment) => segment.block_ids.includes(blockId));
+  let estimated: number | null = null;
+
+  if (target) {
+    const [overrides, edits] = await Promise.all([
+      listDecisionOverrides(bookId),
+      listBlockEdits(bookId),
+    ]);
+    const decisions = resolveBookDecisions(structure, overrides);
+    const editedById = new Map(applyBlockEdits(structure, edits).blocks.map((b) => [b.id, b]));
+    const kept = segmentBlocks(structure, decisions, target.block_ids).map(
+      (block) => editedById.get(block.id) ?? block,
+    );
+
+    const { wordsPerMinute } = segmentOptionsFromDocument(book.segment_options);
+    estimated = Math.round(
+      kept.reduce((sum, block) => sum + estimateSpokenSeconds(block.text, wordsPerMinute), 0),
+    );
+
+    // Mirrors the planner's rule: a segment that opens on a heading is named
+    // after it, so rewording that heading has to rename the segment too.
+    const first = kept[0];
+    const title =
+      first && first.kind === "heading" && first.text.trim() ? first.text.trim() : target.title;
+
+    await patchBookSegment(bookId, target.index, {
+      title,
+      estimated_duration: estimated,
+      state: "pending",
+      task_id: null,
+      audio_path: null,
+      video_path: null,
+      subtitle_path: null,
+      error: null,
+    });
+    await syncBookState(bookId);
+  }
+
+  logger.info(
+    `book block ${reverted ? "reverted" : "edited"}: ${bookId}/${blockId}` +
+      (target ? `, segment ${target.index} marked unrendered` : ", not in any segment"),
+  );
+
+  return c.json(
+    getResponse(200, {
+      book_id: bookId,
+      block_id: blockId,
+      text: body.text,
+      edited: !reverted,
+      segment_index: target?.index ?? null,
+      estimated_duration: estimated,
     }),
   );
 });

@@ -11,7 +11,7 @@
 import { buildFitFilter } from "./clip.ts";
 import { codecQualityArgs, encodeWithCodecFallback, getConfiguredVideoCodec } from "./codec.ts";
 import { escapeFilterValue, num, runFfmpeg, type RunOptions } from "./ffmpeg.ts";
-import { AUDIO_BITRATE, AUDIO_CODEC } from "./generate.ts";
+import { AUDIO_BITRATE, AUDIO_CODEC, BGM_FADE_OUT_SECONDS } from "./generate.ts";
 import { probe } from "./probe.ts";
 import { logger } from "../../utils/logger.ts";
 
@@ -41,6 +41,13 @@ export interface StillSegmentOptions {
   assPath?: string;
   /** Directory fontconfig should scan for the ASS font, normally fontDir(). */
   fontsDir?: string;
+  /**
+   * Resolved background music track, mixed under the narration when set.
+   * Callers must resolve it through the bgm service first — this takes a path.
+   */
+  bgmPath?: string;
+  /** Music gain, 0..1. Ignored without `bgmPath`. */
+  bgmVolume?: number;
   /** Output frame rate; defaults to STILL_FRAMERATE. */
   fps?: number;
   threads?: number;
@@ -53,6 +60,8 @@ export interface StillSegmentResult {
   duration: number;
   /** Whether captions were burned into the picture. */
   burnedSubtitles: boolean;
+  /** Whether music was mixed under the narration. */
+  mixedBgm: boolean;
 }
 
 /**
@@ -98,6 +107,35 @@ export interface StillArgsInput {
   threads: number;
   assPath?: string;
   fontsDir?: string;
+  /** Background music path; absent leaves the narration as the only audio. */
+  bgmPath?: string;
+  bgmVolume?: number;
+}
+
+/**
+ * Audio filter chains that put music under the narration.
+ *
+ * Reads inputs 1 and 2 — the narration and the music in `buildStillArgs`'
+ * fixed order — and is split out only so the mix can be tested on its own.
+ *
+ * Deliberately identical to the short-video mix in generate.ts — same gain,
+ * same tail fade, same `normalize=0` sum — so a chapter and a clip made from
+ * the same track sound the same. `duration=first` ends the mix with the
+ * narration, which is what stops an endlessly looped track from running on.
+ */
+export function buildStillAudioChains(bgmVolume: number, duration: number): string[] {
+  const chains: string[] = [];
+
+  // An unknown narration length has no meaningful point to fade from, and
+  // fading a segment shorter than the fade itself would just start it quiet.
+  const fade =
+    duration > BGM_FADE_OUT_SECONDS
+      ? `,afade=t=out:st=${num(duration - BGM_FADE_OUT_SECONDS, 3)}:d=${BGM_FADE_OUT_SECONDS}`
+      : "";
+
+  chains.push(`[2:a]volume=${num(bgmVolume)}${fade}[bgm]`);
+  chains.push("[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]");
+  return chains;
 }
 
 /** Full ffmpeg argument list for one still segment. Pure, for testability. */
@@ -114,18 +152,31 @@ export function buildStillArgs(input: StillArgsInput, codec: string): string[] {
     input.imagePath,
     "-i",
     input.audioPath,
+  ];
+
+  const videoGraph = buildStillFilterGraph(input.width, input.height, input.assPath, input.fontsDir);
+
+  if (input.bgmPath) {
+    // A library track is minutes long and a chapter is not, so it repeats until
+    // the mix is trimmed to the narration. -stream_loop precedes its own input.
+    args.push("-stream_loop", "-1", "-i", input.bgmPath);
+    // -vf and -filter_complex cannot describe the same output, so once audio
+    // needs a graph the picture moves into it too.
+    args.push(
+      "-filter_complex",
+      [`[0:v]${videoGraph}[v]`, ...buildStillAudioChains(input.bgmVolume ?? 0, input.duration)].join(";"),
+      "-map",
+      "[v]",
+      "-map",
+      "[aout]",
+    );
+  } else {
     // Explicit maps: the image input carries no audio and the narration no
     // picture, so ffmpeg's default stream selection has nothing to guess from.
-    "-map",
-    "0:v:0",
-    "-map",
-    "1:a:0",
-    "-vf",
-    buildStillFilterGraph(input.width, input.height, input.assPath, input.fontsDir),
-    "-c:v",
-    codec,
-    ...codecQualityArgs(codec),
-  ];
+    args.push("-map", "0:v:0", "-map", "1:a:0", "-vf", videoGraph);
+  }
+
+  args.push("-c:v", codec, ...codecQualityArgs(codec));
 
   // -tune is an x264 option; the hardware encoders in the codec whitelist
   // reject or ignore it, so it is only added for the software path.
@@ -158,6 +209,10 @@ export function buildStillArgs(input: StillArgsInput, codec: string): string[] {
 /** Renders one still + narration segment in a single ffmpeg pass. */
 export async function renderStillSegment(options: StillSegmentOptions): Promise<StillSegmentResult> {
   const { imagePath, audioPath, outputFile, width, height, assPath, fontsDir, signal } = options;
+  // A track with no gain would be mixed in inaudibly and still cost a decode of
+  // the whole file, so it is treated as no music at all.
+  const bgmVolume = Number(options.bgmVolume ?? 0);
+  const bgmPath = options.bgmPath && bgmVolume > 0 ? options.bgmPath : undefined;
 
   const audioInfo = await probe(audioPath);
   const duration = audioInfo.duration > 0 ? audioInfo.duration : 0;
@@ -178,9 +233,14 @@ export async function renderStillSegment(options: StillSegmentOptions): Promise<
     threads: options.threads && options.threads > 0 ? options.threads : 2,
     assPath,
     fontsDir,
+    bgmPath,
+    bgmVolume,
   };
 
-  logger.info(`rendering still segment: ${width}x${height}, ${num(duration, 2)}s => ${outputFile}`);
+  logger.info(
+    `rendering still segment: ${width}x${height}, ${num(duration, 2)}s` +
+      `${bgmPath ? `, music at ${num(bgmVolume)}` : ""} => ${outputFile}`,
+  );
 
   await encodeWithCodecFallback(
     (codec) => buildStillArgs(input, codec),
@@ -188,5 +248,5 @@ export async function renderStillSegment(options: StillSegmentOptions): Promise<
     getConfiguredVideoCodec(),
   );
 
-  return { outputFile, duration, burnedSubtitles: Boolean(assPath) };
+  return { outputFile, duration, burnedSubtitles: Boolean(assPath), mixedBgm: Boolean(bgmPath) };
 }

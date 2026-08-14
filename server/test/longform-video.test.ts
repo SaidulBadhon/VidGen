@@ -31,7 +31,12 @@ import {
   subtitleStrategyWarningCode,
   SUBTITLE_BURN_UNAVAILABLE_WARNING,
 } from "../src/services/video/generate.ts";
-import { buildStillArgs, buildStillFilterGraph, buildSubtitlesFilter } from "../src/services/video/still.ts";
+import {
+  buildStillArgs,
+  buildStillAudioChains,
+  buildStillFilterGraph,
+  buildSubtitlesFilter,
+} from "../src/services/video/still.ts";
 import {
   buildSoftSubtitleArgs,
   sidecarSubtitlePath,
@@ -311,6 +316,19 @@ describe("buildAssDocument", () => {
     const document = buildAssDocument([], baseOptions);
     expect(document).toContain("[Events]");
     expect(document).not.toContain("Dialogue:");
+  });
+
+  test("names a Bangla-capable family when the chosen font cannot draw the cues", () => {
+    // libass would otherwise draw every cue as blank boxes: the default font is
+    // CJK-only, so a Bangla narration burns in with no readable subtitles.
+    const document = buildAssDocument([cue(0, 2, "আজকের ভিডিওতে আমরা শিখব")], baseOptions);
+    expect(document).toContain("Noto Sans Bengali");
+    expect(document).not.toContain("Microsoft YaHei");
+  });
+
+  test("leaves the chosen family alone when it covers the cues", () => {
+    const document = buildAssDocument([cue(0, 2, "春天的花海")], baseOptions);
+    expect(document).toContain("Microsoft YaHei");
   });
 });
 
@@ -627,6 +645,64 @@ describe("buildStillArgs", () => {
   test("ends with the output path", () => {
     const args = buildStillArgs(input, "libx264");
     expect(args[args.length - 1]).toBe("/tmp/segment.mp4");
+  });
+
+  describe("with background music", () => {
+    const scored = { ...input, bgmPath: "/tmp/calm.mp3", bgmVolume: 0.2 };
+
+    test("loops the track, because a chapter outlasts any library file", () => {
+      const args = buildStillArgs(scored, "libx264");
+      // -stream_loop applies to the input that follows it, so it must sit
+      // between the narration and the music, never before the image.
+      expect(args.slice(args.indexOf("-stream_loop"), args.indexOf("-stream_loop") + 4)).toEqual([
+        "-stream_loop",
+        "-1",
+        "-i",
+        "/tmp/calm.mp3",
+      ]);
+      expect(args.indexOf("-stream_loop")).toBeGreaterThan(args.indexOf("/tmp/chapter.mp3"));
+    });
+
+    test("moves the picture into the complex graph, since -vf cannot coexist with it", () => {
+      const args = buildStillArgs(scored, "libx264");
+      expect(args).not.toContain("-vf");
+      const graph = args[args.indexOf("-filter_complex") + 1]!;
+      expect(graph).toContain("[0:v]scale=1920:1080");
+      expect(graph).toContain("[v]");
+      expect(args).toContain("[v]");
+      expect(args).toContain("[aout]");
+    });
+
+    test("mixes at the requested gain and sums rather than averages", () => {
+      const graph = buildStillAudioChains(0.2, 903.25).join(";");
+      expect(graph).toContain("[2:a]volume=0.2");
+      // normalize=0 keeps the narration at full level once music is added.
+      expect(graph).toContain("[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]");
+    });
+
+    test("fades the music out over the last seconds of the narration", () => {
+      expect(buildStillAudioChains(0.2, 903.25).join(";")).toContain("afade=t=out:st=900.25:d=3");
+    });
+
+    test("skips the fade when there is no length to fade from", () => {
+      // An unknown duration and a segment shorter than the fade would both
+      // start the music already quiet.
+      expect(buildStillAudioChains(0.2, 0).join(";")).not.toContain("afade");
+      expect(buildStillAudioChains(0.2, 2).join(";")).not.toContain("afade");
+    });
+
+    test("still bounds the output by the narration", () => {
+      const args = buildStillArgs(scored, "libx264");
+      expect(args[args.indexOf("-t") + 1]).toBe("903.25");
+      expect(args).toContain("-shortest");
+    });
+
+    test("leaves the single-input form alone when there is no music", () => {
+      const args = buildStillArgs(input, "libx264");
+      expect(args).not.toContain("-stream_loop");
+      expect(args).not.toContain("-filter_complex");
+      expect(args).toContain("-vf");
+    });
   });
 });
 

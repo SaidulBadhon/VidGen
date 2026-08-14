@@ -14,7 +14,12 @@ import { deleteFiles } from "./concat.ts";
 import { supportsAssBurn } from "./capabilities.ts";
 import { buildSubtitlesFilter } from "./still.ts";
 import { muxSoftSubtitles } from "./softSubs.ts";
-import { renderCueImage, resolveBackgroundColor, type SubtitleStyle } from "./textRender.ts";
+import {
+  renderCueImage,
+  resolveBackgroundColor,
+  resolveSubtitleFontPath,
+  type SubtitleStyle,
+} from "./textRender.ts";
 import { readSrtFile, type SubtitleCue } from "../subtitle/srt.ts";
 import { assRenderOptionsFromParams, writeAssFile } from "../subtitle/ass.ts";
 import { shouldUseBgm } from "../bgm.ts";
@@ -30,8 +35,8 @@ export const AUDIO_CODEC = "aac";
  */
 export const AUDIO_BITRATE = "192k";
 
-/** Music fades over the final seconds of the video. */
-const BGM_FADE_OUT_SECONDS = 3;
+/** Music fades over the final seconds of the video. Shared with the still-image path. */
+export const BGM_FADE_OUT_SECONDS = 3;
 
 /**
  * Cap on subtitle images passed as ffmpeg inputs in one pass.
@@ -180,7 +185,7 @@ export async function buildCueOverlays(
   const [videoWidth, videoHeight] = aspectToResolution(params.video_aspect);
   const fontName = params.font_name || "MicrosoftYaHeiBold.ttc";
   const style: SubtitleStyle = {
-    fontPath: join(fontDir(), fontName),
+    fontPath: resolveSubtitleFontPath(join(fontDir(), fontName), cues.map((cue) => cue.text).join(" ")),
     fontSize: params.font_size,
     textForeColor: params.text_fore_color,
     strokeColor: params.stroke_color,

@@ -197,7 +197,7 @@ server/src/
     music/     Sonilo and ElevenLabs video-to-music
     video/     the FFmpeg engine (probe, clip, transitions, concat, subtitles, mux)
   tasks/       queue, state, pipeline, cross-posting, startup recovery
-web/src/       React UI, with the original nine locale files
+web/src/       React UI, with the original nine locale files plus Bangla
 ```
 
 ### Notes on the rewrite
