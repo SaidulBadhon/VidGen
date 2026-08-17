@@ -4,7 +4,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sanitizeOutputName } from "./fileSecurity.ts";
 import { logger } from "./logger.ts";
@@ -53,6 +53,56 @@ export function taskDir(subDir = ""): string {
  */
 export function bookProjectFolderName(title: string, bookId: string): string {
   return sanitizeOutputName(title, bookId.slice(0, 8) || "book");
+}
+
+/**
+ * Rewrites an absolute path that lived under `fromDir` so it lives under `toDir`.
+ *
+ * Stored segment audio/video paths are absolute. After a book is renamed its
+ * output folder moves, and leaving those paths pointing at the old folder would
+ * make every finished segment look deleted.
+ */
+export function rewritePathPrefix(
+  filePath: string | null | undefined,
+  fromDir: string,
+  toDir: string,
+): string | null | undefined {
+  if (filePath == null || fromDir === toDir) return filePath;
+  if (filePath === fromDir) return toDir;
+  const sep = fromDir.includes("\\") && !fromDir.includes("/") ? "\\" : "/";
+  const prefix = fromDir.endsWith("/") || fromDir.endsWith("\\") ? fromDir : fromDir + sep;
+  if (filePath.startsWith(prefix)) return toDir + filePath.slice(fromDir.length);
+  return filePath;
+}
+
+/**
+ * Renames the file stem of a stored path, leaving the directory and extension.
+ *
+ * A segment's mp3/mp4/srt are named after its title. After a rename those
+ * files move with the folder, and this keeps the stored path pointing at the
+ * new stem rather than at a leftover `Old Title.mp4` beside the new one.
+ */
+export function rewriteFileStem(filePath: string, oldStem: string, newStem: string): string {
+  if (!oldStem || oldStem === newStem) return filePath;
+  const directory = dirname(filePath);
+  const file = basename(filePath);
+  const extension = extname(file);
+  const stem = extension ? file.slice(0, -extension.length) : file;
+  if (stem !== oldStem) return filePath;
+  return join(directory, `${newStem}${extension}`);
+}
+
+/** Folder move plus stem rename, for one stored segment file. */
+export function rewriteSegmentFilePath(
+  filePath: string | null | undefined,
+  fromDir: string,
+  toDir: string,
+  oldStem: string,
+  newStem: string,
+): string | null | undefined {
+  const moved = rewritePathPrefix(filePath, fromDir, toDir);
+  if (moved == null) return moved;
+  return rewriteFileStem(moved, oldStem, newStem);
 }
 
 /** `001 Chapter I` — padded so Finder lists videos in reading order. */

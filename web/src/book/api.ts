@@ -365,6 +365,17 @@ export interface RenderResult {
   title?: string;
 }
 
+export interface BookRenameResult {
+  book_id: string;
+  title: string;
+}
+
+export interface SegmentRenameResult {
+  book_id: string;
+  index: number;
+  title: string;
+}
+
 // ---------------------------------------------------------------------------
 // Endpoints
 // ---------------------------------------------------------------------------
@@ -386,6 +397,13 @@ export const bookApi = {
   list: (page = 1, pageSize = 20) => request<BookListPage>(`/books?page=${page}&page_size=${pageSize}`),
 
   get: (bookId: string) => request<BookDetail>(bookPath(bookId)),
+
+  /** Changes the display name. The original filename is left alone. */
+  rename: (bookId: string, title: string) =>
+    request<BookRenameResult>(bookPath(bookId), {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
 
   blocks: (bookId: string, page = 1, pageSize = 50) =>
     request<BookBlockPage>(bookPath(bookId, `/blocks?page=${page}&page_size=${pageSize}`)),
@@ -416,6 +434,13 @@ export const bookApi = {
     request<SegmentPlanResult>(bookPath(bookId, "/segments"), {
       method: "PATCH",
       body: JSON.stringify(options),
+    }),
+
+  /** Changes one segment's display name. Re-planning still rebuilds titles from headings. */
+  renameSegment: (bookId: string, index: number, title: string) =>
+    request<SegmentRenameResult>(bookPath(bookId, `/segments/${index}`), {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
     }),
 
   uploadCover: (bookId: string, file: File) => {

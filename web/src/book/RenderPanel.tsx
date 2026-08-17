@@ -34,6 +34,7 @@ import {
   type SubtitleRenderMode,
 } from "./api.ts";
 import { DEFAULT_TTS_SERVER, DEFAULT_VOICE_NAME, inferTtsServerFromVoice, voiceFromSettings } from "../lib/voices.ts";
+import { SegmentTitleEditor } from "./SegmentTitleEditor.tsx";
 
 /** Radix Select renders an empty value as a blank trigger, so "server default" needs a name. */
 const DEFAULT_FONT = "__default__";
@@ -78,8 +79,30 @@ const COVER_POSITION_CLASS: Record<CoverTitlePosition, string> = {
   bottom_right: "bottom-[7%] right-[8%] items-end text-right",
 };
 
-const TITLE_SHADOW =
-  "[text-shadow:0_0_10px_#000,0_0_22px_rgba(0,0,0,0.9),0_2px_6px_#000]";
+const TITLE_SHADOW = "[text-shadow:0_1px_4px_rgba(0,0,0,0.85)]";
+
+function coverVertical(position: CoverTitlePosition): "top" | "center" | "bottom" {
+  if (position.startsWith("top")) return "top";
+  if (position.startsWith("bottom")) return "bottom";
+  return "center";
+}
+
+function CoverScrims({ positions }: { positions: CoverTitlePosition[] }) {
+  const kinds = new Set(positions.map(coverVertical));
+  return (
+    <>
+      {kinds.has("top") && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-[42%] bg-gradient-to-b from-black/80 via-black/45 to-transparent" />
+      )}
+      {kinds.has("bottom") && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-[42%] bg-gradient-to-t from-black/80 via-black/45 to-transparent" />
+      )}
+      {kinds.has("center") && (
+        <div className="pointer-events-none absolute inset-x-0 top-1/2 h-[36%] -translate-y-1/2 bg-gradient-to-b from-transparent via-black/60 to-transparent" />
+      )}
+    </>
+  );
+}
 
 function CoverOverlayCopy({
   bookTitle,
@@ -157,6 +180,15 @@ function CoverPreview({
           <ImageIcon size={22} />
           <p className="text-xs">{emptyLabel}</p>
         </div>
+      )}
+
+      {overlay && (
+        <CoverScrims
+          positions={[
+            ...(showBookTitle ? [bookPosition] : []),
+            ...(showChapterTitle ? [chapterPosition] : []),
+          ]}
+        />
       )}
 
       {stacked ? (
@@ -686,8 +718,13 @@ export function RenderPanel({
                           <td className="py-2 pr-3 align-middle tabular-nums text-muted-foreground">
                             {segment.index + 1}
                           </td>
-                          <td className="py-2 pr-3 align-middle" title={segment.title}>
-                            <span className="line-clamp-2">{segment.title || t("Book Untitled Segment")}</span>
+                          <td className="py-2 pr-3 align-middle">
+                            <SegmentTitleEditor
+                              bookId={bookId}
+                              index={segment.index}
+                              title={segment.title}
+                              locked={busy}
+                            />
                             {segment.error && (
                               <div className="text-xs text-destructive" title={segment.error}>
                                 <span className="line-clamp-2">{segment.error}</span>

@@ -125,6 +125,24 @@ export const bookPaginationSchema = z.object({
 });
 export type BookPagination = z.infer<typeof bookPaginationSchema>;
 
+/**
+ * A display title a reviewer can write.
+ *
+ * Trimmed and bounded so a pasted filename cannot become a 4 KB heading. Shared
+ * by the book and by each segment: both names become folder names on disk.
+ */
+export const bookTitleField = z.string().trim().min(1).max(300);
+
+export const bookPatchSchema = z.object({
+  title: bookTitleField,
+});
+export type BookPatchRequest = z.infer<typeof bookPatchSchema>;
+
+export const bookSegmentPatchSchema = z.object({
+  title: bookTitleField,
+});
+export type BookSegmentPatchRequest = z.infer<typeof bookSegmentPatchSchema>;
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------

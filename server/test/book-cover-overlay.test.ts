@@ -10,7 +10,9 @@ import {
   coverOverlayCacheName,
   coverOverlayCopy,
   coverTitlePositionsFromParams,
+  layoutCoverScrim,
   layoutCoverTitleBlock,
+  mergeCoverScrims,
   renderCoverStill,
   renderDefaultCover,
   resolveCoverTitlePosition,
@@ -160,6 +162,55 @@ describe("layoutCoverTitleBlock", () => {
     expect(left.textAlign).toBe("left");
     expect(left.x).toBe(80);
     expect(left.y).toBe(450);
+  });
+});
+
+describe("layoutCoverScrim", () => {
+  test("a top title shades from the top of the frame to a little below the text", () => {
+    const layout = layoutCoverTitleBlock({
+      position: "top",
+      width: 1000,
+      height: 1000,
+      textHeight: 80,
+    });
+    const scrim = layoutCoverScrim({
+      position: "top",
+      height: 1000,
+      textY: layout.y,
+      textHeight: 80,
+    });
+    expect(scrim.kind).toBe("top");
+    expect(scrim.y).toBe(0);
+    expect(scrim.y + scrim.height).toBeGreaterThan(layout.y + 80);
+    expect(scrim.y + scrim.height).toBeLessThan(500);
+  });
+
+  test("a bottom title shades from a little above the text to the bottom edge", () => {
+    const layout = layoutCoverTitleBlock({
+      position: "bottom",
+      width: 1000,
+      height: 1000,
+      textHeight: 80,
+    });
+    const scrim = layoutCoverScrim({
+      position: "bottom",
+      height: 1000,
+      textY: layout.y,
+      textHeight: 80,
+    });
+    expect(scrim.kind).toBe("bottom");
+    expect(scrim.y).toBeLessThan(layout.y);
+    expect(scrim.y + scrim.height).toBe(1000);
+  });
+
+  test("top-left and top-right titles share one full-width top fade", () => {
+    const merged = mergeCoverScrims([
+      layoutCoverScrim({ position: "top_left", height: 1000, textY: 70, textHeight: 80 }),
+      layoutCoverScrim({ position: "top_right", height: 1000, textY: 70, textHeight: 80 }),
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.kind).toBe("top");
+    expect(merged[0]!.y).toBe(0);
   });
 });
 

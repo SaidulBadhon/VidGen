@@ -14,7 +14,9 @@ import { describe, expect, test } from "bun:test";
 import {
   bookDecisionOverrideSchema,
   bookPaginationSchema,
+  bookPatchSchema,
   bookRenderRequestSchema,
+  bookSegmentPatchSchema,
   bookSegmentOptionsSchema,
   bookUploadOptionsSchema,
   renderParamsToDocument,
@@ -222,6 +224,26 @@ describe("bookPaginationSchema", () => {
   test("rejects a page below one and a page size past the cap", () => {
     expect(() => bookPaginationSchema.parse({ page: 0 })).toThrow();
     expect(() => bookPaginationSchema.parse({ page_size: 5000 })).toThrow();
+  });
+});
+
+describe("bookPatchSchema", () => {
+  test("trims the title", () => {
+    expect(bookPatchSchema.parse({ title: "  Me Before You  " })).toEqual({ title: "Me Before You" });
+  });
+
+  test("rejects a blank or missing title", () => {
+    expect(() => bookPatchSchema.parse({ title: "   " })).toThrow();
+    expect(() => bookPatchSchema.parse({})).toThrow();
+  });
+
+  test("rejects a title past the cap", () => {
+    expect(() => bookPatchSchema.parse({ title: "x".repeat(301) })).toThrow();
+  });
+
+  test("uses the same title rules for a segment rename", () => {
+    expect(bookSegmentPatchSchema.parse({ title: "  Chapter I  " })).toEqual({ title: "Chapter I" });
+    expect(() => bookSegmentPatchSchema.parse({ title: "" })).toThrow();
   });
 });
 

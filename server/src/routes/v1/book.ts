@@ -15,7 +15,7 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rename, rm } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
 import { appConfig, resolveVoiceName } from "../../config/settings.ts";
@@ -37,6 +37,7 @@ import {
   patchBookSegment,
   readBookStructure,
   replaceBookSegments,
+  rewriteSegmentOutputPaths,
   resolveBookDecisions,
   syncBookState,
   upsertBlockEdit,
@@ -53,8 +54,10 @@ import {
   bookBlockTextSchema,
   bookDecisionOverrideSchema,
   bookPaginationSchema,
+  bookPatchSchema,
   bookRenderRequestSchema,
   bookSegmentOptionsSchema,
+  bookSegmentPatchSchema,
   bookUploadOptionsSchema,
   renderParamsToDocument,
   segmentOptionsFromDocument,
@@ -78,7 +81,7 @@ import { deleteTask, getRecentTaskLogs, getTask } from "../../tasks/state.ts";
 import { resolvePathWithinDirectory, sanitizeUploadFilename, UnsafePathError } from "../../utils/fileSecurity.ts";
 import { errorMessage, logger } from "../../utils/logger.ts";
 import { getResponse, getUuid, sleep } from "../../utils/misc.ts";
-import { bookProjectFolderName, taskDir } from "../../utils/paths.ts";
+import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName, rewriteSegmentFilePath, taskDir } from "../../utils/paths.ts";
 
 export const bookRouter = new Hono();
 
@@ -543,6 +546,50 @@ bookRouter.get("/books", async (c) => {
   return c.json(getResponse(200, { books: withProgress, total, page, page_size: pageSize }));
 });
 
+/**
+ * Renames a book.
+ *
+ * The display title is also the output folder name, so a rename has to move
+ * that folder and rewrite the absolute paths stored on finished segments.
+ * Refused while anything is rendering: those tasks are already writing into
+ * the old folder, and moving it underneath them would lose the files.
+ */
+bookRouter.patch("/books/:id", async (c) => {
+  const bookId = c.req.param("id");
+  const book = await requireBook(bookId);
+  const { title } = bookPatchSchema.parse(await c.req.json().catch(() => ({})));
+
+  if (title === book.title) {
+    return c.json(getResponse(200, { book_id: bookId, title }));
+  }
+
+  requireIdleSegments(bookId, await listBookSegments(bookId));
+
+  const tasksRoot = taskDir();
+  const fromDir = join(tasksRoot, bookProjectFolderName(book.title, bookId));
+  const toDir = join(tasksRoot, bookProjectFolderName(title, bookId));
+
+  if (fromDir !== toDir && existsSync(fromDir)) {
+    if (existsSync(toDir)) {
+      throw badRequest(
+        `cannot rename: an output folder named "${bookProjectFolderName(title, bookId)}" already exists`,
+        bookId,
+      );
+    }
+    await rename(fromDir, toDir);
+  }
+  await rewriteSegmentOutputPaths(bookId, fromDir, toDir);
+
+  const structure = await readBookStructure(bookId);
+  if (structure && structure.title !== title) {
+    await writeBookStructure(bookId, { ...structure, title });
+  }
+
+  await patchBook(bookId, { title });
+  logger.info(`book renamed: ${bookId} "${book.title}" -> "${title}"`);
+  return c.json(getResponse(200, { book_id: bookId, title }));
+});
+
 bookRouter.get("/books/:id", async (c) => {
   const bookId = c.req.param("id");
   const book = await requireBook(bookId);
@@ -918,6 +965,94 @@ bookRouter.patch("/books/:id/segments", async (c) => {
       segments: segments.map(publicSegment),
     }),
   );
+});
+
+const SEGMENT_OUTPUT_EXTENSIONS = ["mp3", "mp4", "srt"] as const;
+
+/**
+ * Moves a segment's output folder and files to match a new title.
+ *
+ * The folder is `001 Chapter I` and the files inside are named after the same
+ * stem, so both have to move. Paths already stored on the row are rewritten to
+ * follow; a render that has not produced files yet is a no-op on disk.
+ */
+async function relocateSegmentOutput(
+  book: BookDocument,
+  segment: BookSegmentDocument,
+  title: string,
+): Promise<{
+  audio_path: string | null | undefined;
+  video_path: string | null | undefined;
+  subtitle_path: string | null | undefined;
+}> {
+  const bookFolder = join(taskDir(), bookProjectFolderName(book.title, book._id));
+  const fromDir = join(bookFolder, bookSegmentFolderName(segment.index, segment.title));
+  const toDir = join(bookFolder, bookSegmentFolderName(segment.index, title));
+  const oldStem = bookSegmentFileStem(segment.title, segment.index);
+  const newStem = bookSegmentFileStem(title, segment.index);
+
+  if (fromDir !== toDir && existsSync(fromDir)) {
+    if (existsSync(toDir)) {
+      throw badRequest(
+        `cannot rename: an output folder named "${bookSegmentFolderName(segment.index, title)}" already exists`,
+        book._id,
+      );
+    }
+    await rename(fromDir, toDir);
+  }
+
+  const liveDir = existsSync(toDir) ? toDir : fromDir;
+  if (oldStem !== newStem && existsSync(liveDir)) {
+    for (const ext of SEGMENT_OUTPUT_EXTENSIONS) {
+      const fromFile = join(liveDir, `${oldStem}.${ext}`);
+      const toFile = join(liveDir, `${newStem}.${ext}`);
+      if (!existsSync(fromFile)) continue;
+      if (existsSync(toFile)) {
+        throw badRequest(`cannot rename: "${newStem}.${ext}" already exists`, book._id);
+      }
+      await rename(fromFile, toFile);
+    }
+  }
+
+  return {
+    audio_path: rewriteSegmentFilePath(segment.audio_path, fromDir, toDir, oldStem, newStem),
+    video_path: rewriteSegmentFilePath(segment.video_path, fromDir, toDir, oldStem, newStem),
+    subtitle_path: rewriteSegmentFilePath(segment.subtitle_path, fromDir, toDir, oldStem, newStem),
+  };
+}
+
+/**
+ * Renames one segment.
+ *
+ * Refused only while *this* segment is rendering: its siblings live in their
+ * own folders, so renaming chapter 12 cannot collide with a render of chapter 3.
+ * A re-plan still rebuilds titles from headings, which is why this does not
+ * bump the book revision.
+ */
+bookRouter.patch("/books/:id/segments/:index", async (c) => {
+  const bookId = c.req.param("id");
+  const index = Number(c.req.param("index"));
+  if (!Number.isInteger(index) || index < 0) {
+    throw badRequest("segment index must be a non-negative integer", bookId);
+  }
+
+  const book = await requireBook(bookId);
+  const segment = await getBookSegment(bookId, index);
+  if (!segment) throw notFound("segment not found", bookId);
+
+  const { title } = bookSegmentPatchSchema.parse(await c.req.json().catch(() => ({})));
+  if (title === segment.title) {
+    return c.json(getResponse(200, { book_id: bookId, index, title }));
+  }
+
+  if (ACTIVE_SEGMENT_STATES.has(segment.state)) {
+    throw conflict("this segment is still rendering; wait until it finishes before renaming it", bookId);
+  }
+
+  const paths = await relocateSegmentOutput(book, segment, title);
+  await patchBookSegment(bookId, index, { title, ...paths });
+  logger.info(`segment renamed: ${bookId}/${index} "${segment.title}" -> "${title}"`);
+  return c.json(getResponse(200, { book_id: bookId, index, title }));
 });
 
 // ---------------------------------------------------------------------------

@@ -59,6 +59,14 @@ export interface CoverTitleLayout {
   maxWidth: number;
 }
 
+export type CoverScrimKind = "top" | "center" | "bottom";
+
+export interface CoverScrim {
+  kind: CoverScrimKind;
+  y: number;
+  height: number;
+}
+
 /** True when the still should be re-rasterised with titles on top. */
 export function wantsCoverTitleBurn(params: CoverOverlayFlags): boolean {
   return Boolean(params.burn_book_title || params.burn_chapter_title);
@@ -109,7 +117,7 @@ export function coverTitlePositionsFromParams(params: {
 
 function coverTitleAnchor(position: CoverTitlePosition): {
   h: "left" | "center" | "right";
-  v: "top" | "center" | "bottom";
+  v: CoverScrimKind;
 } {
   const h: "left" | "center" | "right" = position.endsWith("left")
     ? "left"
@@ -153,6 +161,50 @@ export function layoutCoverTitleBlock(options: {
     v === "top" ? padY : v === "bottom" ? height - padY - textHeight : (height - textHeight) / 2;
 
   return { x, y, textAlign: h, maxWidth: coverTitleMaxWidth(position, width) };
+}
+
+/**
+ * Full-width gradient band behind a title.
+ *
+ * Top titles shade from the top of the frame to a little below the last line;
+ * bottom titles do the same from the bottom; centred titles get a band that
+ * fades out above and below. Always the full frame width — a plate around the
+ * letters is not this.
+ */
+export function layoutCoverScrim(options: {
+  position: CoverTitlePosition;
+  height: number;
+  textY: number;
+  textHeight: number;
+}): CoverScrim {
+  const kind = coverTitleAnchor(options.position).v;
+  const extra = Math.max(Math.round(options.height * 0.1), Math.round(options.textHeight * 0.55));
+  if (kind === "top") {
+    return { kind, y: 0, height: Math.min(options.height, options.textY + options.textHeight + extra) };
+  }
+  if (kind === "bottom") {
+    const y = Math.max(0, options.textY - extra);
+    return { kind, y, height: options.height - y };
+  }
+  const y = Math.max(0, options.textY - extra);
+  const end = Math.min(options.height, options.textY + options.textHeight + extra);
+  return { kind: "center", y, height: end - y };
+}
+
+/** One band per edge so a top-left book and a top-right chapter share a single top fade. */
+export function mergeCoverScrims(scrims: readonly CoverScrim[]): CoverScrim[] {
+  const byKind = new Map<CoverScrimKind, CoverScrim>();
+  for (const scrim of scrims) {
+    const existing = byKind.get(scrim.kind);
+    if (!existing) {
+      byKind.set(scrim.kind, { ...scrim });
+      continue;
+    }
+    const y = Math.min(existing.y, scrim.y);
+    const end = Math.max(existing.y + existing.height, scrim.y + scrim.height);
+    byKind.set(scrim.kind, { kind: scrim.kind, y, height: end - y });
+  }
+  return [...byKind.values()];
 }
 
 /**
@@ -263,11 +315,9 @@ async function drawFittedImage(ctx: SKRSContext2D, imagePath: string, width: num
 }
 
 /**
- * A full-glyph shadow, then the coloured letters on top.
- *
- * A small drop shadow only darkens the edge; drawing the same letters in black
- * first, with a blur about as wide as the type, puts a halo behind the whole
- * word so it still reads on a busy cover.
+ * A light drop on the letters themselves. The readable shadow is the full-width
+ * gradient behind them; this only keeps the glyphs from dissolving into a
+ * bright patch of the cover.
  */
 function paintCoverLine(
   ctx: SKRSContext2D,
@@ -277,22 +327,37 @@ function paintCoverLine(
   fontSize: number,
   color: string,
 ): void {
-  const blur = Math.max(8, Math.round(fontSize * 1.05));
   ctx.shadowColor = COVER_TEXT_SHADOW;
-  ctx.shadowBlur = blur;
+  ctx.shadowBlur = Math.max(3, Math.round(fontSize * 0.22));
   ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = Math.max(1, Math.round(fontSize * 0.06));
-  ctx.fillStyle = "#000000";
+  ctx.shadowOffsetY = Math.max(1, Math.round(fontSize * 0.05));
+  ctx.fillStyle = color;
   ctx.fillText(line, x, y);
-
-  ctx.shadowBlur = Math.round(blur * 0.45);
-  ctx.fillText(line, x, y);
-
   ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
   ctx.shadowOffsetY = 0;
-  ctx.fillStyle = color;
-  ctx.fillText(line, x, y);
+}
+
+function paintCoverScrim(ctx: SKRSContext2D, scrim: CoverScrim, width: number): void {
+  const y0 = scrim.y;
+  const y1 = scrim.y + scrim.height;
+  const gradient = ctx.createLinearGradient(0, y0, 0, y1);
+  if (scrim.kind === "top") {
+    gradient.addColorStop(0, "rgba(0,0,0,0.82)");
+    gradient.addColorStop(0.52, "rgba(0,0,0,0.5)");
+    gradient.addColorStop(1, "rgba(0,0,0,0)");
+  } else if (scrim.kind === "bottom") {
+    gradient.addColorStop(0, "rgba(0,0,0,0)");
+    gradient.addColorStop(0.48, "rgba(0,0,0,0.5)");
+    gradient.addColorStop(1, "rgba(0,0,0,0.82)");
+  } else {
+    gradient.addColorStop(0, "rgba(0,0,0,0)");
+    gradient.addColorStop(0.32, "rgba(0,0,0,0.62)");
+    gradient.addColorStop(0.68, "rgba(0,0,0,0.62)");
+    gradient.addColorStop(1, "rgba(0,0,0,0)");
+  }
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, y0, width, scrim.height);
 }
 
 function paintCoverLines(
@@ -370,6 +435,15 @@ export async function renderCoverStill(options: CoverStillOptions): Promise<Buff
   );
   const stack = bookLines.length > 0 && chapterLines.length > 0 && positions.book === positions.chapter;
 
+  const paints: {
+    lines: string[];
+    fontSize: number;
+    lineHeight: number;
+    color: string;
+    layout: CoverTitleLayout;
+  }[] = [];
+  const scrims: CoverScrim[] = [];
+
   if (stack) {
     const textHeight =
       bookLines.length * bookLineHeight + chapterLines.length * chapterLineHeight + gap;
@@ -379,32 +453,84 @@ export async function renderCoverStill(options: CoverStillOptions): Promise<Buff
       height,
       textHeight,
     });
-    paintCoverLines(ctx, bookLines, family, bookSize, bookLineHeight, COVER_TITLE_COLOR, layout);
-    paintCoverLines(ctx, chapterLines, family, chapterSize, chapterLineHeight, COVER_CHAPTER_COLOR, {
-      ...layout,
-      y: layout.y + bookLines.length * bookLineHeight + gap,
+    scrims.push(
+      layoutCoverScrim({
+        position: positions.book,
+        height,
+        textY: layout.y,
+        textHeight,
+      }),
+    );
+    paints.push({
+      lines: bookLines,
+      fontSize: bookSize,
+      lineHeight: bookLineHeight,
+      color: COVER_TITLE_COLOR,
+      layout,
     });
-    return canvas.toBuffer("image/png");
+    paints.push({
+      lines: chapterLines,
+      fontSize: chapterSize,
+      lineHeight: chapterLineHeight,
+      color: COVER_CHAPTER_COLOR,
+      layout: { ...layout, y: layout.y + bookLines.length * bookLineHeight + gap },
+    });
+  } else {
+    if (bookLines.length) {
+      const textHeight = bookLines.length * bookLineHeight;
+      const layout = layoutCoverTitleBlock({
+        position: positions.book,
+        width,
+        height,
+        textHeight,
+      });
+      scrims.push(
+        layoutCoverScrim({
+          position: positions.book,
+          height,
+          textY: layout.y,
+          textHeight,
+        }),
+      );
+      paints.push({
+        lines: bookLines,
+        fontSize: bookSize,
+        lineHeight: bookLineHeight,
+        color: COVER_TITLE_COLOR,
+        layout,
+      });
+    }
+    if (chapterLines.length) {
+      const textHeight = chapterLines.length * chapterLineHeight;
+      const layout = layoutCoverTitleBlock({
+        position: positions.chapter,
+        width,
+        height,
+        textHeight,
+      });
+      scrims.push(
+        layoutCoverScrim({
+          position: positions.chapter,
+          height,
+          textY: layout.y,
+          textHeight,
+        }),
+      );
+      paints.push({
+        lines: chapterLines,
+        fontSize: chapterSize,
+        lineHeight: chapterLineHeight,
+        color: COVER_CHAPTER_COLOR,
+        layout,
+      });
+    }
   }
 
-  if (bookLines.length) {
-    const layout = layoutCoverTitleBlock({
-      position: positions.book,
-      width,
-      height,
-      textHeight: bookLines.length * bookLineHeight,
-    });
-    paintCoverLines(ctx, bookLines, family, bookSize, bookLineHeight, COVER_TITLE_COLOR, layout);
+  for (const scrim of mergeCoverScrims(scrims)) {
+    paintCoverScrim(ctx, scrim, width);
   }
-
-  if (chapterLines.length) {
-    const layout = layoutCoverTitleBlock({
-      position: positions.chapter,
-      width,
-      height,
-      textHeight: chapterLines.length * chapterLineHeight,
-    });
-    paintCoverLines(ctx, chapterLines, family, chapterSize, chapterLineHeight, COVER_CHAPTER_COLOR, layout);
+  for (const paint of paints) {
+    paintCoverLines(ctx, paint.lines, family, paint.fontSize, paint.lineHeight, paint.color, paint.layout);
   }
 
   return canvas.toBuffer("image/png");

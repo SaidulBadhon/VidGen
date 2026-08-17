@@ -34,7 +34,7 @@ import { materialSourceRecord } from "../src/services/material/download.ts";
 import { safePublicUrl } from "../src/services/material/http.ts";
 import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt, languageLabel } from "../src/services/llm/prompts.ts";
 import { extractJson, formatScriptResponse, stripCodeFence } from "../src/services/llm/index.ts";
-import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName } from "../src/utils/paths.ts";
+import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName, rewriteFileStem, rewritePathPrefix, rewriteSegmentFilePath } from "../src/utils/paths.ts";
 import { isOwnerAlive, parseOwner, PROCESS_OWNER_ID } from "../src/tasks/owner.ts";
 
 beforeAll(() => {
@@ -178,6 +178,38 @@ describe("book output folders", () => {
 
   test("uses the chapter title as the file stem inside that folder", () => {
     expect(bookSegmentFileStem("I. The Period", 0)).toBe("I. The Period");
+  });
+
+  test("rewrites stored paths when the book folder moves", () => {
+    const fromDir = "/storage/tasks/Me Before You - PDFDrive.com";
+    const toDir = "/storage/tasks/Me Before You";
+    expect(rewritePathPrefix(`${fromDir}/001 Chapter I/Chapter I.mp4`, fromDir, toDir)).toBe(
+      `${toDir}/001 Chapter I/Chapter I.mp4`,
+    );
+    expect(rewritePathPrefix(fromDir, fromDir, toDir)).toBe(toDir);
+    expect(rewritePathPrefix("/storage/tasks/other/file.mp4", fromDir, toDir)).toBe(
+      "/storage/tasks/other/file.mp4",
+    );
+    expect(rewritePathPrefix(null, fromDir, toDir)).toBeNull();
+  });
+
+  test("rewrites the file stem when a segment is renamed", () => {
+    const dir = "/storage/tasks/Me Before You/001 Chapter I";
+    expect(rewriteFileStem(`${dir}/Chapter I.mp4`, "Chapter I", "The Airport")).toBe(
+      `${dir}/The Airport.mp4`,
+    );
+    expect(rewriteFileStem(`${dir}/subtitle.ass`, "Chapter I", "The Airport")).toBe(
+      `${dir}/subtitle.ass`,
+    );
+  });
+
+  test("rewrites a stored segment path after both the folder and the stem move", () => {
+    const fromDir = "/storage/tasks/Me Before You/001 Chapter I";
+    const toDir = "/storage/tasks/Me Before You/001 The Airport";
+    expect(
+      rewriteSegmentFilePath(`${fromDir}/Chapter I.mp4`, fromDir, toDir, "Chapter I", "The Airport"),
+    ).toBe(`${toDir}/The Airport.mp4`);
+    expect(rewriteSegmentFilePath(null, fromDir, toDir, "Chapter I", "The Airport")).toBeNull();
   });
 });
 

@@ -8,9 +8,9 @@
  * is a separate page; this one is named after the book at the top.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft, Check, Loader2, Pencil, X } from "lucide-react";
 import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useI18n } from "../i18n/index.tsx";
 import {
@@ -21,7 +21,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "../components/ui/breadcrumb";
-import { Alert, Badge, Button, Progress, TabContent, TabTrigger, Tabs, TabsList } from "../components/ui.tsx";
+import { Alert, Badge, Button, Progress, TabContent, TabTrigger, Tabs, TabsList, TextInput } from "../components/ui.tsx";
 import { ImportPanel } from "./ImportPanel.tsx";
 import { ReviewPanel } from "./ReviewPanel.tsx";
 import { SegmentsPanel } from "./SegmentsPanel.tsx";
@@ -30,6 +30,7 @@ import {
   bookApi,
   errorText,
   isOcrState,
+  isRenderConflict,
   subscribeToBook,
   type BookDetail,
   type BookEvent,
@@ -61,6 +62,156 @@ function bookPath(bookId: string, step: Step = "import"): string {
 function headerState(detail: BookDetail, renderingActive: boolean): BookState {
   if (isOcrState(detail.book.state) || detail.book.state === "failed") return detail.book.state;
   return renderingActive ? "rendering" : detail.progress.state;
+}
+
+/**
+ * The heading that names the open book, and the control that changes it.
+ *
+ * Clicking the pencil turns the title into a field; Enter saves, Escape
+ * cancels. Refused while a render is in flight because the output folder is
+ * named after this title.
+ */
+function BookTitleEditor({
+  bookId,
+  title,
+  locked,
+}: {
+  bookId: string;
+  title: string;
+  locked: boolean;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!editing) setDraft(title);
+  }, [editing, title]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const rename = useMutation({
+    mutationFn: (next: string) => bookApi.rename(bookId, next),
+    onSuccess: (result) => {
+      setEditing(false);
+      queryClient.setQueryData(["book", bookId], (current: BookDetail | undefined) =>
+        current ? { ...current, book: { ...current.book, title: result.title } } : current,
+      );
+      queryClient.invalidateQueries({ queryKey: ["book", bookId] });
+      queryClient.invalidateQueries({ queryKey: ["books"] });
+    },
+  });
+
+  const trimmed = draft.trim();
+
+  const close = () => {
+    setDraft(title);
+    setEditing(false);
+    rename.reset();
+  };
+
+  const save = () => {
+    if (!trimmed) return;
+    if (trimmed === title) {
+      close();
+      return;
+    }
+    rename.mutate(trimmed);
+  };
+
+  if (editing) {
+    return (
+      <form
+        className="space-y-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+      >
+        <div className="flex items-center gap-1.5">
+          <TextInput
+            ref={inputRef}
+            value={draft}
+            disabled={rename.isPending}
+            maxLength={300}
+            autoComplete="off"
+            aria-label={t("Book Title")}
+            placeholder={t("Book Rename Placeholder")}
+            className="h-10 min-w-0 flex-1 text-2xl font-semibold tracking-tight md:text-2xl"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !rename.isPending) {
+                event.preventDefault();
+                close();
+              }
+            }}
+          />
+          <Button
+            type="submit"
+            size="sm"
+            variant="primary"
+            disabled={rename.isPending || !trimmed}
+            title={t("Save")}
+            aria-label={t("Save")}
+          >
+            {rename.isPending ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={rename.isPending}
+            title={t("Cancel")}
+            aria-label={t("Cancel")}
+            onClick={close}
+          >
+            <X size={14} />
+          </Button>
+        </div>
+        {rename.isError && (
+          <Alert tone={isRenderConflict(rename.error) ? "warning" : "danger"}>{errorText(rename.error, t)}</Alert>
+        )}
+      </form>
+    );
+  }
+
+  return (
+    <div className="flex min-w-0 items-center gap-1.5">
+      <h2 className="min-w-0">
+        <button
+          type="button"
+          disabled={locked}
+          className="max-w-full truncate text-left text-2xl font-semibold tracking-tight disabled:cursor-not-allowed"
+          title={locked ? t("Book Rename Locked") : t("Book Rename")}
+          onClick={() => {
+            setDraft(title);
+            setEditing(true);
+          }}
+        >
+          {title || t("Book Untitled")}
+        </button>
+      </h2>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="shrink-0"
+        disabled={locked}
+        title={locked ? t("Book Rename Locked") : t("Book Rename")}
+        aria-label={locked ? t("Book Rename Locked") : t("Book Rename")}
+        onClick={() => {
+          setDraft(title);
+          setEditing(true);
+        }}
+      >
+        <Pencil size={14} />
+      </Button>
+    </div>
+  );
 }
 
 export function BookScreen() {
@@ -193,9 +344,11 @@ export function BookScreen() {
               </span>
             ) : (
               <>
-                <h2 className="truncate text-2xl font-semibold tracking-tight">
-                  {detail?.book.title ?? t("Book Untitled")}
-                </h2>
+                {detail ? (
+                  <BookTitleEditor bookId={bookId} title={detail.book.title} locked={renderingActive} />
+                ) : (
+                  <h2 className="truncate text-2xl font-semibold tracking-tight">{t("Book Untitled")}</h2>
+                )}
                 <p className="mt-1 truncate text-sm text-muted">
                   {detail?.book.author || t("Book Unknown Author")} ·{" "}
                   {t("Book Kept Of Blocks", {

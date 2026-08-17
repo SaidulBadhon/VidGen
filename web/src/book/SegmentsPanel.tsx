@@ -55,6 +55,7 @@ import {
   type SegmentMode,
   type SegmentOptions,
 } from "./api.ts";
+import { SegmentTitleEditor } from "./SegmentTitleEditor.tsx";
 
 function stateTone(state: BookSegmentState): "muted" | "success" | "warning" | "danger" | "accent" {
   if (state === "complete") return "success";
@@ -288,8 +289,13 @@ export function SegmentsPanel({
                           {segment.index + 1}
                         </div>
                       </td>
-                      <td className="py-2.5 pr-3 align-middle" title={segment.title}>
-                        <span className="line-clamp-2">{segment.title || t("Book Untitled Segment")}</span>
+                      <td className="py-2.5 pr-3 align-middle">
+                        <SegmentTitleEditor
+                          bookId={bookId}
+                          index={segment.index}
+                          title={segment.title}
+                          locked={active}
+                        />
                         {segment.error && (
                           <div className="text-xs text-danger" title={segment.error}>
                             <span className="line-clamp-2">{segment.error}</span>

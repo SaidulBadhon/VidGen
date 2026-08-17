@@ -36,7 +36,7 @@ import type {
 import { classifyBlocks } from "../services/book/filter/structural.ts";
 import { mergeDecisions } from "../services/book/filter/decisions.ts";
 import type { BookStructure, FilterDecision } from "../services/book/types.ts";
-import { booksDir } from "../utils/paths.ts";
+import { booksDir, rewritePathPrefix } from "../utils/paths.ts";
 import { logger, errorMessage } from "../utils/logger.ts";
 
 // ---------------------------------------------------------------------------
@@ -264,6 +264,38 @@ export async function listBookSegments(bookId: string): Promise<BookSegmentDocum
 
 export async function deleteBookSegments(bookId: string): Promise<void> {
   await bookSegmentsCollection().deleteMany({ book_id: bookId });
+}
+
+/**
+ * Points stored segment files at a new output folder after a book is renamed.
+ *
+ * The files themselves are the caller's to move; this only rewrites the
+ * absolute paths already saved on each row so downloads keep resolving.
+ */
+export async function rewriteSegmentOutputPaths(
+  bookId: string,
+  fromDir: string,
+  toDir: string,
+): Promise<number> {
+  if (fromDir === toDir) return 0;
+
+  const segments = await listBookSegments(bookId);
+  let updated = 0;
+  for (const segment of segments) {
+    const audio_path = rewritePathPrefix(segment.audio_path, fromDir, toDir);
+    const video_path = rewritePathPrefix(segment.video_path, fromDir, toDir);
+    const subtitle_path = rewritePathPrefix(segment.subtitle_path, fromDir, toDir);
+    if (
+      audio_path === segment.audio_path &&
+      video_path === segment.video_path &&
+      subtitle_path === segment.subtitle_path
+    ) {
+      continue;
+    }
+    await patchBookSegment(bookId, segment.index, { audio_path, video_path, subtitle_path });
+    updated += 1;
+  }
+  return updated;
 }
 
 /** Replaces the whole plan in one pass, so no row of the old plan survives. */
