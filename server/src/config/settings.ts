@@ -10,6 +10,7 @@
 import { settingsCollection } from "../db/client.ts";
 import { logger } from "../utils/logger.ts";
 import {
+  DEFAULT_VOICE_NAME,
   SECRET_FIELDS,
   defaultSettings,
   settingsSchema,
@@ -153,6 +154,48 @@ export function getSettings(): Settings {
 /** Convenience accessor for the largest section. */
 export function appConfig() {
   return getSettings().app;
+}
+
+/**
+ * App-wide language stored in Mongo (`ui.language`).
+ *
+ * Empty means the operator has not chosen one yet; callers that can auto-detect
+ * should keep doing so, and callers that need a language should fall back.
+ */
+export function preferredLanguage(): string {
+  if (!loaded) return "";
+  return (getSettings().ui.language ?? "").trim();
+}
+
+/**
+ * Per-request language wins when set and not `"auto"`; otherwise the stored
+ * preference. Empty still means auto-detect for callers that support it.
+ */
+export function resolveContentLanguage(explicit?: string | null): string {
+  const requested = (explicit ?? "").trim();
+  if (requested && requested.toLowerCase() !== "auto") return requested;
+  return preferredLanguage();
+}
+
+/**
+ * App-wide narration voice stored in Mongo (`ui.voice_name`).
+ *
+ * Empty means the operator has not chosen one yet; generation falls back to
+ * the bundled default so a first-boot video still has a voice.
+ */
+export function preferredVoiceName(): string {
+  if (!loaded) return DEFAULT_VOICE_NAME;
+  return (getSettings().ui.voice_name ?? "").trim() || DEFAULT_VOICE_NAME;
+}
+
+/**
+ * Per-request voice wins when set (including the explicit "no-voice" sentinel);
+ * otherwise the stored preference, then the bundled default.
+ */
+export function resolveVoiceName(explicit?: string | null): string {
+  const requested = (explicit ?? "").trim();
+  if (requested) return requested;
+  return preferredVoiceName();
 }
 
 export type PartialSettings = {

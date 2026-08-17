@@ -2,7 +2,7 @@
  * Listen-before-generate controls for the selected TTS voice and BGM track.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { AudioLines, FileText, Loader2 } from "lucide-react";
 import { api, ApiError, type MediaFile } from "../api/client.ts";
@@ -68,7 +68,7 @@ function sampleTextForVoice(voiceName: string, uiSample: string): string {
   return uiSample;
 }
 
-function PreviewPlayer({ src, volume }: { src: string; volume?: number }) {
+function PreviewPlayer({ src, volume, autoPlay = false }: { src: string; volume?: number; autoPlay?: boolean }) {
   const ref = useRef<HTMLAudioElement>(null);
 
   useEffect(() => {
@@ -77,11 +77,28 @@ function PreviewPlayer({ src, volume }: { src: string; volume?: number }) {
     }
   }, [volume, src]);
 
+  useEffect(() => {
+    const el = ref.current;
+    if (!autoPlay || !el) return;
+    el.currentTime = 0;
+    void el.play().catch(() => undefined);
+  }, [src, autoPlay]);
+
   return (
     // Preview clips have no dialogue captions; this is a settings listen, not a video.
     // eslint-disable-next-line jsx-a11y/media-has-caption
-    <audio ref={ref} src={src} controls preload="metadata" className="audio-preview w-full" />
+    <audio ref={ref} src={src} controls autoPlay={autoPlay} preload={autoPlay ? "auto" : "metadata"} className="audio-preview w-full" />
   );
+}
+
+/** Bump `autoPlayKey` when the user picks a voice so the sample starts itself. */
+export function useVoiceSampleTrigger() {
+  const [autoPlayKey, setAutoPlayKey] = useState(0);
+  const requestSample = useCallback((voice: string) => {
+    if (NO_VOICE.has(voice.trim().toLowerCase())) return;
+    setAutoPlayKey((key) => key + 1);
+  }, []);
+  return { autoPlayKey, requestSample } as const;
 }
 
 export function VoicePreview({
@@ -89,11 +106,14 @@ export function VoicePreview({
   voiceRate,
   voiceVolume,
   script = "",
+  autoPlayKey = 0,
 }: {
   voiceName: string;
   voiceRate: number;
   voiceVolume: number;
   script?: string;
+  /** Incremented when the user picks a voice; synthesizes and plays the sample. */
+  autoPlayKey?: number;
 }) {
   const { t } = useI18n();
   const disabled = NO_VOICE.has(voiceName.trim().toLowerCase());
@@ -163,6 +183,12 @@ export function VoicePreview({
     },
   });
 
+  useEffect(() => {
+    if (!autoPlayKey || disabled) return;
+    synthesize.mutate("sample");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- play only when the user picks a voice
+  }, [autoPlayKey]);
+
   if (disabled) return null;
 
   const pending = synthesize.isPending;
@@ -229,7 +255,7 @@ export function VoicePreview({
       )}
       {preview && (
         <div className="space-y-1.5">
-          <PreviewPlayer src={preview.url} />
+          <PreviewPlayer src={preview.url} autoPlay />
           {preview.kind === "full" && preview.duration != null && (
             <p className="text-xs text-muted">
               {t("Actual Voiceover Duration", { duration: preview.duration.toFixed(1) })}

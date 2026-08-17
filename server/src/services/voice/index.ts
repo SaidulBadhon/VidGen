@@ -13,12 +13,14 @@ import { runFfmpeg } from "../video/ffmpeg.ts";
 import { probe } from "../video/probe.ts";
 import { azureTtsV2, chatterboxTts, elevenlabsTts, geminiTts, mimoTts, siliconflowTts } from "./adapters.ts";
 import { convertRateToPercent, synthesizeEdgeTts } from "./edgeTts.ts";
+import { kokoroTts } from "./kokoro.ts";
 import { buildProportionalCues } from "./syntheticCues.ts";
 import {
   isAzureV2Voice,
   isChatterboxVoice,
   isElevenlabsVoice,
   isGeminiVoice,
+  isKokoroVoice,
   isMimoVoice,
   isNoVoice,
   isSiliconflowVoice,
@@ -236,6 +238,11 @@ export async function tts(request: TtsRequest): Promise<TtsResult | null> {
       voice = voice.slice(0, voice.lastIndexOf("-"));
     }
     return chatterboxTts({ text, voice, voiceFile, voiceRate, signal });
+  }
+
+  if (isKokoroVoice(voiceName)) {
+    // Format: kokoro:voice-Gender. Runs the bundled local model in-process.
+    return kokoroTts({ text, voiceName, voiceFile, voiceRate, signal });
   }
 
   return edgeTts(request);

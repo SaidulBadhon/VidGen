@@ -226,6 +226,7 @@
     "Hide Basic Settings": "Ẩn Cài Đặt Cơ Bản\n\nẨn, thanh cài đặt cơ bản sẽ không hiển thị trên trang web.\n\nNếu bạn muốn hiển thị lại, vui lòng đặt `hide_config = false` trong `config.toml`",
     "LLM Settings": "**Cài Đặt LLM**",
     "LLM Settings Tab": "Cài đặt LLM",
+    "Narration Settings Tab": "Lồng tiếng",
     "Material API Tab": "API tư liệu",
     "Interface Settings Tab": "Cài đặt giao diện",
     "Cache Management Tab": "Quản lý bộ nhớ đệm",

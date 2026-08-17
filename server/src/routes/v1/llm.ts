@@ -4,6 +4,7 @@
  */
 
 import { Hono } from "hono";
+import { resolveContentLanguage } from "../../config/settings.ts";
 import * as llm from "../../services/llm/index.ts";
 import { buildScriptPrompt } from "../../services/llm/prompts.ts";
 import {
@@ -59,7 +60,7 @@ llmRouter.post("/scripts/preview-prompt", async (c) => {
     getResponse(200, {
       prompt: buildScriptPrompt({
         videoSubject: body.video_subject,
-        language: body.video_language,
+        language: resolveContentLanguage(body.video_language),
         paragraphNumber: body.paragraph_number,
         videoScriptPrompt: body.video_script_prompt,
         customSystemPrompt: body.custom_system_prompt,

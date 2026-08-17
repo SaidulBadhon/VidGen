@@ -224,6 +224,7 @@
     "Hide Basic Settings": "Temel Ayarları Gizle\n\nGizlendiği takdirde, temel ayarlar paneli sayfada görüntülenmeyecektir.\n\nTekrar görüntülemek için `config.toml` dosyasında `hide_config = false` olarak ayarlayın",
     "LLM Settings": "**LLM Ayarları**",
     "LLM Settings Tab": "LLM Ayarları",
+    "Narration Settings Tab": "Anlatım",
     "Material API Tab": "Materyal API'leri",
     "Interface Settings Tab": "Arayüz Ayarları",
     "Cache Management Tab": "Önbellek Yönetimi",

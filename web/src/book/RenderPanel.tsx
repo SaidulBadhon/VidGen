@@ -10,12 +10,14 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Image as ImageIcon, Loader2, Play, RotateCw, Upload } from "lucide-react";
 import { api } from "../api/client.ts";
-import { BgmPreview, VoicePreview } from "../components/AudioPreview.tsx";
+import { BgmPreview, VoicePreview, useVoiceSampleTrigger } from "../components/AudioPreview.tsx";
+import { VoiceSelector } from "../components/voice-selector.tsx";
 import { useI18n } from "../i18n/index.tsx";
-import { Alert, Badge, Button, Card, Field, NumberInput, Progress, Select, Slider } from "../components/ui.tsx";
+import { Alert, Badge, Button, Card, Field, NumberInput, Progress, Select, Slider, Switch, cn } from "../components/ui.tsx";
 import {
   ACCEPTED_COVER_EXTENSIONS,
   BOOK_BGM_TYPES,
+  COVER_TITLE_POSITIONS,
   SUBTITLE_RENDER_MODES,
   VIDEO_ASPECTS,
   bookApi,
@@ -28,16 +30,16 @@ import {
   type BookLogLine,
   type BookRenderRequest,
   type BookSegmentState,
+  type CoverTitlePosition,
   type SubtitleRenderMode,
 } from "./api.ts";
-
-const TTS_SERVERS = ["azure-tts-v1", "azure-tts-v2", "siliconflow", "gemini", "mimo", "elevenlabs", "chatterbox"];
+import { DEFAULT_TTS_SERVER, DEFAULT_VOICE_NAME, inferTtsServerFromVoice, voiceFromSettings } from "../lib/voices.ts";
 
 /** Radix Select renders an empty value as a blank trigger, so "server default" needs a name. */
 const DEFAULT_FONT = "__default__";
 
 const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
-  voice_name: "en-US-AriaNeural-Female",
+  voice_name: DEFAULT_VOICE_NAME,
   voice_rate: 1,
   voice_volume: 1,
   subtitle_render_mode: "soft",
@@ -50,9 +52,200 @@ const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   font_name: "",
   font_size: 48,
   n_threads: 2,
+  burn_book_title: false,
+  burn_chapter_title: false,
+  cover_book_title_position: "bottom",
+  cover_chapter_title_position: "bottom",
 };
 
 type RenderForm = typeof DEFAULT_FORM;
+
+function coverPreviewFrameClass(aspect: string): string {
+  if (aspect === "9:16") return "mx-auto aspect-[9/16] h-72 w-auto";
+  if (aspect === "1:1") return "mx-auto aspect-square h-64 w-auto";
+  return "aspect-video w-full";
+}
+
+const COVER_POSITION_CLASS: Record<CoverTitlePosition, string> = {
+  top_left: "top-[7%] left-[8%] items-start text-left",
+  top: "top-[7%] inset-x-[8%] items-center text-center",
+  top_right: "top-[7%] right-[8%] items-end text-right",
+  left: "left-[8%] inset-y-[7%] justify-center items-start text-left",
+  center: "inset-[7%] items-center justify-center text-center",
+  right: "right-[8%] inset-y-[7%] justify-center items-end text-right",
+  bottom_left: "bottom-[7%] left-[8%] items-start text-left",
+  bottom: "bottom-[7%] inset-x-[8%] items-center text-center",
+  bottom_right: "bottom-[7%] right-[8%] items-end text-right",
+};
+
+const TITLE_SHADOW =
+  "[text-shadow:0_0_10px_#000,0_0_22px_rgba(0,0,0,0.9),0_2px_6px_#000]";
+
+function CoverOverlayCopy({
+  bookTitle,
+  chapterTitle,
+  showBookTitle,
+  showChapterTitle,
+  position,
+}: {
+  bookTitle: string;
+  chapterTitle: string;
+  showBookTitle: boolean;
+  showChapterTitle: boolean;
+  position: CoverTitlePosition;
+}) {
+  if (!showBookTitle && !showChapterTitle) return null;
+  return (
+    <div className={cn("pointer-events-none absolute flex flex-col", COVER_POSITION_CLASS[position])}>
+      {showBookTitle && (
+        <p className={cn("line-clamp-3 text-sm font-semibold leading-snug text-white", TITLE_SHADOW)}>
+          {bookTitle}
+        </p>
+      )}
+      {showChapterTitle && (
+        <p className={cn("line-clamp-2 text-xs leading-snug text-white/85", TITLE_SHADOW, showBookTitle && "mt-0.5")}>
+          {chapterTitle}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The still as it will be encoded: fitted cover, then optional titles with a
+ * drop shadow. The preview uses the first chapter; each clip burns its own.
+ */
+function CoverPreview({
+  src,
+  alt,
+  emptyLabel,
+  aspect,
+  bookTitle,
+  chapterTitle,
+  showBookTitle,
+  showChapterTitle,
+  bookPosition,
+  chapterPosition,
+}: {
+  src?: string;
+  alt: string;
+  emptyLabel: string;
+  aspect: string;
+  bookTitle: string;
+  chapterTitle: string;
+  showBookTitle: boolean;
+  showChapterTitle: boolean;
+  bookPosition: CoverTitlePosition;
+  chapterPosition: CoverTitlePosition;
+}) {
+  const overlay = showBookTitle || showChapterTitle;
+  const stacked = showBookTitle && showChapterTitle && bookPosition === chapterPosition;
+
+  return (
+    <div
+      className={cn(
+        "relative flex items-center justify-center overflow-hidden rounded-lg border border-border bg-black",
+        coverPreviewFrameClass(aspect),
+      )}
+    >
+      {src ? (
+        <img src={src} alt={alt} className="h-full w-full object-contain" />
+      ) : overlay ? (
+        <div className="h-full w-full bg-[#14161c]" />
+      ) : (
+        <div className="flex flex-col items-center gap-2 p-4 text-center text-muted-foreground">
+          <ImageIcon size={22} />
+          <p className="text-xs">{emptyLabel}</p>
+        </div>
+      )}
+
+      {stacked ? (
+        <CoverOverlayCopy
+          bookTitle={bookTitle}
+          chapterTitle={chapterTitle}
+          showBookTitle
+          showChapterTitle
+          position={bookPosition}
+        />
+      ) : (
+        <>
+          <CoverOverlayCopy
+            bookTitle={bookTitle}
+            chapterTitle={chapterTitle}
+            showBookTitle={showBookTitle}
+            showChapterTitle={false}
+            position={bookPosition}
+          />
+          <CoverOverlayCopy
+            bookTitle={bookTitle}
+            chapterTitle={chapterTitle}
+            showBookTitle={false}
+            showChapterTitle={showChapterTitle}
+            position={chapterPosition}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function CoverTitlePositionPicker({
+  value,
+  onChange,
+  disabled,
+  label,
+}: {
+  value: CoverTitlePosition;
+  onChange: (value: CoverTitlePosition) => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <Field label={label}>
+      <div
+        className="grid w-[5.75rem] grid-cols-3 gap-1"
+        role="radiogroup"
+        aria-label={label}
+      >
+        {COVER_TITLE_POSITIONS.map((position) => {
+          const selected = value === position;
+          return (
+            <button
+              key={position}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              aria-label={t(`Book Cover Position ${position}`)}
+              title={t(`Book Cover Position ${position}`)}
+              disabled={disabled}
+              className={cn(
+                "h-7 rounded-sm border transition-colors",
+                selected
+                  ? "border-primary bg-primary"
+                  : "border-border bg-muted/70 hover:bg-muted",
+                disabled && "pointer-events-none opacity-50",
+              )}
+              onClick={() => onChange(position)}
+            />
+          );
+        })}
+      </div>
+    </Field>
+  );
+}
+
+function storedCoverPosition(
+  value: string | undefined,
+  fallback?: string,
+): CoverTitlePosition {
+  const candidate = value ?? fallback;
+  if (candidate && COVER_TITLE_POSITIONS.includes(candidate as CoverTitlePosition)) {
+    return candidate as CoverTitlePosition;
+  }
+  return "bottom";
+}
 
 function stateTone(state: BookSegmentState): "muted" | "success" | "warning" | "danger" | "accent" {
   if (state === "complete") return "success";
@@ -83,11 +276,12 @@ export function RenderPanel({
   const coverInput = useRef<HTMLInputElement>(null);
   const syncedRef = useRef("");
 
-  const [ttsServer, setTtsServer] = useState("azure-tts-v1");
+  const [ttsServer, setTtsServer] = useState<string>(DEFAULT_TTS_SERVER);
   const [form, setForm] = useState<RenderForm>(DEFAULT_FORM);
+  const { autoPlayKey, requestSample } = useVoiceSampleTrigger();
 
   const metadata = useQuery({ queryKey: ["settings-metadata"], queryFn: api.getSettingsMetadata });
-  const voices = useQuery({ queryKey: ["voices", ttsServer], queryFn: () => api.listVoices(ttsServer) });
+  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const musics = useQuery({ queryKey: ["musics"], queryFn: api.listMusics });
 
   // Seeded once per stored settings change; a background refetch of the book
@@ -97,11 +291,15 @@ export function RenderPanel({
   useEffect(() => {
     const key = `${bookId}:${storedKey}`;
     if (syncedRef.current === key) return;
-    syncedRef.current = key;
     if (!stored) {
-      setForm(DEFAULT_FORM);
+      if (!settings.isSuccess) return;
+      const { voiceName, ttsServer: server } = voiceFromSettings(settings.data.ui);
+      setForm({ ...DEFAULT_FORM, voice_name: voiceName });
+      setTtsServer(server);
+      syncedRef.current = key;
       return;
     }
+    syncedRef.current = key;
     setForm({
       voice_name: stored.voice_name,
       voice_rate: stored.voice_rate,
@@ -116,8 +314,19 @@ export function RenderPanel({
       font_name: stored.font_name,
       font_size: stored.font_size,
       n_threads: stored.n_threads,
+      burn_book_title: stored.burn_book_title ?? false,
+      burn_chapter_title: stored.burn_chapter_title ?? false,
+      cover_book_title_position: storedCoverPosition(
+        stored.cover_book_title_position,
+        stored.cover_title_position,
+      ),
+      cover_chapter_title_position: storedCoverPosition(
+        stored.cover_chapter_title_position,
+        stored.cover_title_position,
+      ),
     });
-  }, [bookId, storedKey, stored]);
+    setTtsServer(inferTtsServerFromVoice(stored.voice_name));
+  }, [bookId, storedKey, stored, settings.isSuccess, settings.data]);
 
   const uploadCover = useMutation({
     mutationFn: (file: File) => bookApi.uploadCover(bookId, file),
@@ -164,32 +373,23 @@ export function RenderPanel({
   const percent = progress?.progress ?? detail?.progress.progress ?? 0;
   const queue = detail?.queue;
 
-  const voiceOptions = (voices.data?.voices ?? []).map((voice) => ({ value: voice, label: voice }));
-  // The stored voice may not belong to the server currently selected; keep it
-  // listed so the select never silently shows a different voice than it sends.
-  if (form.voice_name && !voiceOptions.some((option) => option.value === form.voice_name)) {
-    voiceOptions.unshift({ value: form.voice_name, label: form.voice_name });
-  }
-
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card title={t("Book Cover")}>
           <div className="space-y-3">
-            <div className="flex aspect-video items-center justify-center overflow-hidden rounded-lg border border-border bg-surface-2">
-              {detail?.book.has_cover ? (
-                <img
-                  src={bookApi.coverUrl(bookId, detail.book.revision)}
-                  alt={t("Book Cover Alt", { title: detail.book.title })}
-                  className="h-full w-full object-contain"
-                />
-              ) : (
-                <div className="flex flex-col items-center gap-2 p-4 text-center text-muted">
-                  <ImageIcon size={22} />
-                  <p className="text-xs">{t("Book No Cover")}</p>
-                </div>
-              )}
-            </div>
+            <CoverPreview
+              src={detail?.book.has_cover ? bookApi.coverUrl(bookId, detail.book.revision) : undefined}
+              alt={t("Book Cover Alt", { title: detail?.book.title ?? "" })}
+              emptyLabel={t("Book No Cover")}
+              aspect={form.video_aspect}
+              bookTitle={detail?.book.title?.trim() || t("Book Cover")}
+              chapterTitle={segments[0]?.title?.trim() || t("Book Cover Chapter Preview")}
+              showBookTitle={form.burn_book_title}
+              showChapterTitle={form.burn_chapter_title}
+              bookPosition={form.cover_book_title_position}
+              chapterPosition={form.cover_chapter_title_position}
+            />
 
             <input
               ref={coverInput}
@@ -211,28 +411,52 @@ export function RenderPanel({
               {uploadCover.isPending ? <Loader2 className="animate-spin" size={14} /> : <Upload size={14} />}
               {detail?.book.has_cover ? t("Book Replace Cover") : t("Book Upload Cover")}
             </Button>
-            <p className="text-xs text-muted">{t("Book Cover Hint")}</p>
+            <p className="text-xs text-muted-foreground">{t("Book Cover Hint")}</p>
             {uploadCover.isError && <Alert tone="danger">{errorText(uploadCover.error, t)}</Alert>}
+
+            <hr className="border-border" />
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-2">
+                <Switch
+                  checked={form.burn_book_title}
+                  onCheckedChange={(value) => set("burn_book_title", value)}
+                  label={t("Book Cover Burn Title")}
+                />
+                <CoverTitlePositionPicker
+                  value={form.cover_book_title_position}
+                  onChange={(value) => set("cover_book_title_position", value)}
+                  disabled={!form.burn_book_title}
+                  label={t("Book Cover Book Position")}
+                />
+              </div>
+              <div className="space-y-2">
+                <Switch
+                  checked={form.burn_chapter_title}
+                  onCheckedChange={(value) => set("burn_chapter_title", value)}
+                  label={t("Book Cover Burn Chapter")}
+                />
+                <CoverTitlePositionPicker
+                  value={form.cover_chapter_title_position}
+                  onChange={(value) => set("cover_chapter_title_position", value)}
+                  disabled={!form.burn_chapter_title}
+                  label={t("Book Cover Chapter Position")}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">{t("Book Cover Burn Hint")}</p>
           </div>
         </Card>
 
         <Card title={t("Book Narration")}>
           <div className="space-y-3">
-            <Field label={t("TTS Server")}>
-              <Select
-                value={ttsServer}
-                onValueChange={setTtsServer}
-                options={TTS_SERVERS.map((server) => ({ value: server, label: server }))}
-              />
-            </Field>
-            <Field label={t("Speech Synthesis")}>
-              <Select
-                value={form.voice_name}
-                onValueChange={(value) => set("voice_name", value)}
-                options={voiceOptions}
-                placeholder={voices.isLoading ? t("Loading") : t("Book Pick A Voice")}
-              />
-            </Field>
+            <VoiceSelector
+              ttsServer={ttsServer}
+              voiceName={form.voice_name}
+              onTtsServerChange={setTtsServer}
+              onVoiceNameChange={(value) => set("voice_name", value)}
+              onPreviewVoice={requestSample}
+            />
             <Field label={t("Speech Rate")}>
               <Slider
                 value={form.voice_rate}
@@ -257,6 +481,7 @@ export function RenderPanel({
               voiceName={form.voice_name}
               voiceRate={form.voice_rate}
               voiceVolume={form.voice_volume}
+              autoPlayKey={autoPlayKey}
             />
 
             <hr className="border-border" />
@@ -291,7 +516,7 @@ export function RenderPanel({
                       event.target.value = "";
                     }}
                   />
-                  <span className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                  <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
                     {uploadMusic.isPending ? (
                       <Loader2 className="animate-spin" size={12} />
                     ) : (
@@ -353,7 +578,7 @@ export function RenderPanel({
             </Field>
 
             <details className="rounded-lg border border-border bg-surface-2 p-3">
-              <summary className="cursor-pointer text-xs font-medium text-muted">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
                 {t("Book Subtitle Appearance")}
               </summary>
               <div className="mt-3 space-y-3">
@@ -393,15 +618,15 @@ export function RenderPanel({
         <div className="space-y-3">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <span>
-              <span className="text-muted">{t("Book Segments")}: </span>
+              <span className="text-muted-foreground">{t("Book Segments")}: </span>
               <span className="font-medium tabular-nums">{segments.length}</span>
             </span>
             <span>
-              <span className="text-muted">{t("Book Estimated Total")}: </span>
+              <span className="text-muted-foreground">{t("Book Estimated Total")}: </span>
               <span className="font-medium tabular-nums">{formatDuration(totalDuration)}</span>
             </span>
             <span>
-              <span className="text-muted">{t("Book Kept")}: </span>
+              <span className="text-muted-foreground">{t("Book Kept")}: </span>
               <span className="font-medium tabular-nums">{detail?.book.kept_block_count ?? 0}</span>
             </span>
           </div>
@@ -438,11 +663,11 @@ export function RenderPanel({
 
           {segments.length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs text-muted">{t("Book Render One Hint")}</p>
+              <p className="text-xs text-muted-foreground">{t("Book Render One Hint")}</p>
               <div className="scroll-x">
                 <table className="w-full min-w-[520px] border-collapse text-sm">
                   <thead>
-                    <tr className="border-b border-border text-left text-xs text-muted">
+                    <tr className="border-b border-border text-left text-xs text-muted-foreground">
                       <th className="pb-2 pr-3 font-medium">#</th>
                       <th className="pb-2 pr-3 font-medium">{t("Book Segment Title")}</th>
                       <th className="pb-2 pr-3 font-medium">{t("Book Estimated Duration")}</th>
@@ -458,13 +683,13 @@ export function RenderPanel({
                       const posting = startRender.isPending && startRender.variables?.[0] === segment.index;
                       return (
                         <tr key={segment._id} className="border-b border-border/60 last:border-0">
-                          <td className="py-2 pr-3 align-middle tabular-nums text-muted">
+                          <td className="py-2 pr-3 align-middle tabular-nums text-muted-foreground">
                             {segment.index + 1}
                           </td>
                           <td className="py-2 pr-3 align-middle" title={segment.title}>
                             <span className="line-clamp-2">{segment.title || t("Book Untitled Segment")}</span>
                             {segment.error && (
-                              <div className="text-xs text-danger" title={segment.error}>
+                              <div className="text-xs text-destructive" title={segment.error}>
                                 <span className="line-clamp-2">{segment.error}</span>
                               </div>
                             )}
@@ -526,7 +751,7 @@ export function RenderPanel({
         >
           <div className="space-y-3">
             <Progress value={percent} />
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted">
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-muted-foreground">
               <span>{t("Book Segment State pending")}: {counts.pending}</span>
               <span>{t("Book Segment State queued")}: {counts.queued}</span>
               <span>{t("Book Segment State rendering")}: {counts.rendering}</span>
@@ -535,7 +760,7 @@ export function RenderPanel({
             </div>
 
             {queue && queue.waiting > 0 && (
-              <p className="text-xs text-muted">
+              <p className="text-xs text-muted-foreground">
                 {t("Book Queue Note", { active: queue.active, waiting: queue.waiting, limit: queue.limit })}
               </p>
             )}
@@ -544,7 +769,7 @@ export function RenderPanel({
 
             {failed.length > 0 && (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium text-danger">
+                <p className="text-xs font-medium text-destructive">
                   {t("Book Segments Failed", { count: failed.length })}
                 </p>
                 {failed.map((segment) => (
@@ -556,7 +781,7 @@ export function RenderPanel({
                       <p className="truncate text-sm font-medium">
                         #{segment.index + 1} {segment.title || t("Book Untitled Segment")}
                       </p>
-                      <p className="text-xs text-muted">{segment.error ?? t("Task Status Failed")}</p>
+                      <p className="text-xs text-muted-foreground">{segment.error ?? t("Task Status Failed")}</p>
                     </div>
                     <Button
                       size="sm"
@@ -607,7 +832,7 @@ function ActivityFeed({ lines }: { lines: BookLogLine[] }) {
 
   return (
     <details open>
-      <summary className="cursor-pointer text-xs text-muted">{t("Book Activity")}</summary>
+      <summary className="cursor-pointer text-xs text-muted-foreground">{t("Book Activity")}</summary>
       <pre
         ref={scroller}
         className="scroll-x mt-2 max-h-56 overflow-auto rounded-lg border border-border bg-surface-2 p-2 text-xs"

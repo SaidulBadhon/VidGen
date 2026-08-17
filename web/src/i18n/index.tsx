@@ -7,7 +7,9 @@
  * than this needs.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../api/client.ts";
 
 import bn from "./locales/bn.json";
 import de from "./locales/de.json";
@@ -44,6 +46,40 @@ const LOCALES: Record<string, Record<string, string>> = Object.fromEntries(
 );
 
 const STORAGE_KEY = "mpt.language";
+const COOKIE_KEY = "vidgen_language";
+
+function readCookie(name: string): string {
+  const prefix = `${name}=`;
+  for (const part of document.cookie.split(";")) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith(prefix)) return decodeURIComponent(trimmed.slice(prefix.length));
+  }
+  return "";
+}
+
+function readStoredLanguage(): string {
+  const local = localStorage.getItem(STORAGE_KEY);
+  if (local && LOCALES[local]) return local;
+  const cookie = readCookie(COOKIE_KEY);
+  if (cookie && LOCALES[cookie]) return cookie;
+  return "";
+}
+
+function writeStoredLanguage(next: string) {
+  localStorage.setItem(STORAGE_KEY, next);
+  document.cookie = `${COOKIE_KEY}=${encodeURIComponent(next)};path=/;max-age=31536000;SameSite=Lax`;
+  document.documentElement.lang = next;
+}
+
+function browserLanguage(): string {
+  for (const candidate of navigator.languages ?? [navigator.language]) {
+    const normalized = candidate.toLowerCase().replace(/_/g, "-");
+    if (LOCALES[normalized]) return normalized;
+    const base = normalized.split("-")[0]!;
+    if (LOCALES[base]) return base;
+  }
+  return "en";
+}
 
 /**
  * Strips Streamlit-only markup from a translation.
@@ -62,22 +98,9 @@ function stripStreamlitMarkup(value: string): string {
     .trim();
 }
 
-/**
- * Resolves the initial language: saved choice, then browser locale, then
- * English. Browsers report region-qualified locales, so the base code is tried
- * as a fallback.
- */
+/** Saved choice first, then browser locale, then English. Never writes storage. */
 function resolveInitialLanguage(): string {
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved && LOCALES[saved]) return saved;
-
-  for (const candidate of navigator.languages ?? [navigator.language]) {
-    const normalized = candidate.toLowerCase().replace(/_/g, "-");
-    if (LOCALES[normalized]) return normalized;
-    const base = normalized.split("-")[0]!;
-    if (LOCALES[base]) return base;
-  }
-  return "en";
+  return readStoredLanguage() || browserLanguage();
 }
 
 /**
@@ -114,12 +137,72 @@ interface I18nValue {
 const I18nContext = createContext<I18nValue | null>(null);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [language, setLanguageState] = useState(resolveInitialLanguage);
+  const languageRef = useRef(language);
+  languageRef.current = language;
+  const userPicked = useRef(false);
+  const pendingSave = useRef<string | null>(null);
+  const saving = useRef(false);
+
+  const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
+
+  const persistLanguage = useCallback(
+    (next: string) => {
+      pendingSave.current = next;
+      if (saving.current) return;
+      saving.current = true;
+
+      const flush = () => {
+        const toSave = pendingSave.current;
+        if (!toSave) {
+          saving.current = false;
+          return;
+        }
+        pendingSave.current = null;
+        void api
+          .saveSettings({ ui: { language: toSave } })
+          .then((updated) => {
+            if (pendingSave.current === null) {
+              queryClient.setQueryData(["settings"], updated);
+            }
+          })
+          .catch(() => {
+            // Keep the local choice; the next change or load retries Mongo.
+          })
+          .finally(flush);
+      };
+
+      flush();
+    },
+    [queryClient],
+  );
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, language);
     document.documentElement.lang = language;
   }, [language]);
+
+  // Mongo is the saved choice. localStorage is only a first-paint cache, and
+  // is never written from the browser default — that was clobbering Mongo on
+  // reload. A pick in this session wins over a stale in-flight GET.
+  useEffect(() => {
+    if (!settingsQuery.isSuccess || userPicked.current) return;
+    const fromMongo = String(settingsQuery.data.ui?.language ?? "").trim();
+    if (!fromMongo || !LOCALES[fromMongo]) return;
+    writeStoredLanguage(fromMongo);
+    if (fromMongo !== languageRef.current) setLanguageState(fromMongo);
+  }, [settingsQuery.isSuccess, settingsQuery.data]);
+
+  const setLanguage = useCallback(
+    (next: string) => {
+      if (!LOCALES[next] || next === languageRef.current) return;
+      userPicked.current = true;
+      writeStoredLanguage(next);
+      setLanguageState(next);
+      persistLanguage(next);
+    },
+    [persistLanguage],
+  );
 
   const t = useCallback(
     (key: string, vars?: Record<string, string | number>) => translateIn(language, key, vars),
@@ -127,8 +210,8 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<I18nValue>(
-    () => ({ language, setLanguage: setLanguageState, t }),
-    [language, t],
+    () => ({ language, setLanguage, t }),
+    [language, setLanguage, t],
   );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

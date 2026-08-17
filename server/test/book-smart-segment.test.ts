@@ -14,6 +14,8 @@ import {
   heuristicSections,
   looksLikeSectionTitle,
   looksLikeTocHeading,
+  numberedChapterLabel,
+  formatSectionTitle,
   normalizeSections,
   planBookSegments,
   planSmartSegments,
@@ -90,6 +92,9 @@ describe("looksLikeSectionTitle", () => {
     expect(looksLikeSectionTitle("Book the First")).toBe(true);
     expect(looksLikeSectionTitle("Book the First—Recalled to Life")).toBe(true);
     expect(looksLikeSectionTitle("Prologue")).toBe(true);
+    expect(looksLikeSectionTitle("1")).toBe(true);
+    expect(looksLikeSectionTitle("12")).toBe(true);
+    expect(looksLikeSectionTitle("Chapter 3")).toBe(true);
   });
 
   test("does not treat ordinary prose as a title", () => {
@@ -100,6 +105,20 @@ describe("looksLikeSectionTitle", () => {
       ),
     ).toBe(false);
     expect(looksLikeSectionTitle("")).toBe(false);
+    expect(looksLikeSectionTitle("2007")).toBe(false);
+    expect(looksLikeSectionTitle("12 Rules")).toBe(false);
+  });
+});
+
+describe("formatSectionTitle", () => {
+  test("turns a bare number into Chapter N and keeps a following heading", () => {
+    expect(numberedChapterLabel("1")).toBe("Chapter 1");
+    expect(numberedChapterLabel("I. The Period")).toBeNull();
+    expect(formatSectionTitle("1")).toBe("Chapter 1");
+    expect(formatSectionTitle("1", "2009")).toBe("Chapter 1 — 2009");
+    expect(formatSectionTitle("8", "Camilla")).toBe("Chapter 8 — Camilla");
+    expect(formatSectionTitle("I. The Period")).toBe("I. The Period");
+    expect(formatSectionTitle("Chapter 8 — Camilla", "Camilla")).toBe("Chapter 8 — Camilla");
   });
 });
 
@@ -231,6 +250,56 @@ describe("planSmartSegments", () => {
 
     expect(segments.flatMap((segment) => segment.blockIds)).toEqual(book.blocks.map((block) => block.id));
   });
+
+  test("titles numbered chapters instead of swallowing them as parts of an earlier number", () => {
+    const book = buildBook([
+      { blocks: [{ text: "1", kind: "heading" }, { text: "2009", kind: "heading" }, timed(50)] },
+      { blocks: [{ text: "2", kind: "heading" }, timed(50)] },
+      { blocks: [{ text: "3", kind: "heading" }, timed(50)] },
+      { blocks: [{ text: "8", kind: "heading" }, { text: "Camilla", kind: "heading" }, timed(50)] },
+    ]);
+    const segments = planSmartSegments(
+      book,
+      book.blocks,
+      withOptions({ targetDurationSeconds: 40, maxDurationSeconds: 80 }),
+      [
+        { startBlockId: "0:0", title: "1" },
+        { startBlockId: "1:0", title: "2" },
+        { startBlockId: "2:0", title: "3" },
+        { startBlockId: "3:0", title: "8" },
+      ],
+    );
+
+    expect(segments.map((segment) => segment.title)).toEqual([
+      "A Tale of Two Cities — Charles Dickens — Chapter 1 — 2009",
+      "Chapter 2",
+      "Chapter 3",
+      "Chapter 8 — Camilla",
+    ]);
+  });
+
+  test("duration-split uses a later chapter heading instead of 2 (part N)", () => {
+    const book = buildBook([
+      {
+        blocks: [
+          { text: "2", kind: "heading" },
+          ...paragraphs(5, 20),
+          { text: "3", kind: "heading" },
+          ...paragraphs(5, 20),
+        ],
+      },
+    ]);
+    const segments = planSmartSegments(
+      book,
+      book.blocks,
+      withOptions({ targetDurationSeconds: 55, maxDurationSeconds: 100 }),
+      [{ startBlockId: "0:0", title: "2" }],
+    );
+
+    expect(segments[0]!.title).toBe("A Tale of Two Cities — Charles Dickens — Chapter 2");
+    expect(segments.some((segment) => segment.title === "Chapter 3")).toBe(true);
+    expect(segments.some((segment) => /^2 \(part \d+\)$/.test(segment.title))).toBe(false);
+  });
 });
 
 describe("detectSmartSections", () => {
@@ -264,6 +333,47 @@ describe("detectSmartSections", () => {
     expect(heuristicSections(buildOutline(book, book.blocks, 150)).length).toBeGreaterThan(1);
     expect(sections.map((section) => section.startBlockId)).toContain("0:2");
     expect(sections.find((section) => section.startBlockId === "0:2")?.title).toBe("I. The Period");
+  });
+
+  test("keeps numbered chapter headings the model omitted", async () => {
+    const book = buildBook([
+      { blocks: [{ text: "1", kind: "heading" }, { text: "2009", kind: "heading" }, timed(40)] },
+      { blocks: [{ text: "2", kind: "heading" }, timed(40)] },
+      { blocks: [{ text: "3", kind: "heading" }, timed(40)] },
+      { blocks: [{ text: "8", kind: "heading" }, { text: "Camilla", kind: "heading" }, timed(40)] },
+    ]);
+    const { sections } = await detectSmartSections(book, book.blocks, withOptions({}), async () => [
+      { startBlockId: "0:0", title: "1" },
+      { startBlockId: "3:0", title: "8" },
+    ]);
+
+    const starts = sections.map((section) => section.startBlockId);
+    expect(starts).toContain("0:0");
+    expect(starts).toContain("1:0");
+    expect(starts).toContain("2:0");
+    expect(starts).toContain("3:0");
+    expect(sections.find((section) => section.startBlockId === "0:0")?.title).toBe("Chapter 1");
+    expect(sections.find((section) => section.startBlockId === "1:0")?.title).toBe("Chapter 2");
+    expect(sections.find((section) => section.startBlockId === "2:0")?.title).toBe("Chapter 3");
+  });
+
+  test("does not honour an LLM skip of a numbered chapter heading", async () => {
+    const book = buildBook([
+      { blocks: [{ text: "2", kind: "heading" }, timed(40)] },
+      { blocks: [{ text: "3", kind: "heading" }, timed(40)] },
+    ]);
+    const { sections, skipBlockIds } = await detectSmartSections(
+      book,
+      book.blocks,
+      withOptions({}),
+      async () => ({
+        sections: [{ startBlockId: "0:0", title: "2" }],
+        skipBlockIds: ["1:0"],
+      }),
+    );
+
+    expect(skipBlockIds).not.toContain("1:0");
+    expect(sections.map((section) => section.startBlockId)).toContain("1:0");
   });
 });
 
@@ -470,6 +580,7 @@ describe("buildSegmentBoundariesPrompt", () => {
 
     expect(prompt).toContain("skip_block_ids");
     expect(prompt).toContain("table of contents");
+    expect(prompt).toContain("numbered chapter heading");
     expect(prompt).not.toContain("The first section should start at the first outline id");
   });
 });

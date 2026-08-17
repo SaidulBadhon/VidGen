@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookOpen, FileUp, Loader2, Trash2, Upload } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useI18n } from "../i18n/index.tsx";
+import { PageHeader } from "../components/page-header.tsx";
 import { Alert, Badge, Button, Card, Dialog, Progress } from "../components/ui.tsx";
 import {
   ACCEPTED_BOOK_EXTENSIONS,
@@ -98,10 +99,7 @@ export function LibraryScreen() {
 
   return (
     <div className="space-y-5">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight">{t("Book Library")}</h2>
-        <p className="mt-1 text-sm text-muted">{t("Book Library Intro")}</p>
-      </div>
+      <PageHeader title={t("Book Library")} description={t("Book Library Intro")} />
 
       <Card>
         <div
@@ -116,14 +114,14 @@ export function LibraryScreen() {
             accept(event.dataTransfer.files?.[0]);
           }}
           className={
-            "flex flex-col items-center gap-3 rounded-xl border-2 border-dashed px-4 py-8 text-center transition sm:flex-row sm:text-left " +
-            (dragging ? "border-accent bg-accent/5" : "border-border bg-surface-2")
+            "flex flex-col items-center gap-3 rounded-xl border-2 border-dashed px-4 py-8 text-center text-foreground transition sm:flex-row sm:text-left " +
+            (dragging ? "border-primary bg-primary/5" : "border-border bg-muted/40")
           }
         >
-          <FileUp size={26} className="shrink-0 text-muted" />
+          <FileUp size={26} className="shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium">{t("Book Drop Here")}</p>
-            <p className="mt-1 text-xs text-muted">{t("Book Drop Hint")}</p>
+            <p className="text-sm font-medium text-foreground">{t("Book Drop Here")}</p>
+            <p className="mt-1 text-xs text-foreground/70">{t("Book Drop Hint")}</p>
           </div>
           <input
             ref={fileInput}
@@ -153,20 +151,20 @@ export function LibraryScreen() {
       </Card>
 
       {books.isLoading ? (
-        <div className="flex items-center gap-2 py-10 text-sm text-muted">
+        <div className="flex items-center gap-2 py-10 text-sm text-muted-foreground">
           <Loader2 className="animate-spin" size={16} /> {t("Loading")}
         </div>
       ) : books.isError ? (
         <Alert tone="danger">{errorText(books.error, t)}</Alert>
       ) : entries.length === 0 ? (
-        <p className="py-10 text-center text-sm text-muted">{t("Book Library Empty")}</p>
+        <p className="py-10 text-center text-sm text-muted-foreground">{t("Book Library Empty")}</p>
       ) : (
         <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {entries.map((book) => {
             const state = libraryState(book);
             return (
               <li key={book._id}>
-                <article className="flex h-full gap-3 rounded-xl border border-border bg-surface p-3 shadow-sm transition hover:border-accent/60 hover:bg-accent/5">
+                <article className="flex h-full gap-3 rounded-xl border bg-card p-3 shadow-sm transition hover:border-primary/60 hover:bg-primary/5">
                   <button
                     type="button"
                     className="flex min-w-0 flex-1 items-start gap-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -179,16 +177,16 @@ export function LibraryScreen() {
                         className="h-[4.5rem] w-12 shrink-0 rounded-md object-cover"
                       />
                     ) : (
-                      <div className="flex h-[4.5rem] w-12 shrink-0 items-center justify-center rounded-md bg-surface-2 text-muted">
+                      <div className="flex h-[4.5rem] w-12 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
                         <BookOpen size={18} />
                       </div>
                     )}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold">{book.title}</p>
-                      <p className="mt-0.5 truncate text-xs text-muted">
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
                         {book.author || t("Book Unknown Author")} · {book.format.toUpperCase()}
                       </p>
-                      <p className="mt-0.5 truncate text-xs text-muted">
+                      <p className="mt-0.5 truncate text-xs text-muted-foreground">
                         {t("Book Kept Of Blocks", {
                           kept: book.kept_block_count,
                           total: book.block_count,
@@ -200,7 +198,7 @@ export function LibraryScreen() {
                         </div>
                       )}
                       {isOcrState(book.state) && book.ocr && (
-                        <p className="mt-1 truncate text-xs text-accent">
+                        <p className="mt-1 truncate text-xs text-primary">
                           {t("Book Ocr Page Of", { done: book.ocr.pages_done, total: book.ocr.pages_total })}
                         </p>
                       )}
@@ -235,7 +233,7 @@ export function LibraryScreen() {
           title={t("Book Delete Title", { title: pendingDelete.title })}
         >
           <div className="space-y-4">
-            <p className="text-sm text-muted">{t("Book Delete Warning")}</p>
+            <p className="text-sm text-muted-foreground">{t("Book Delete Warning")}</p>
             <div className="flex justify-end gap-2">
               <Button onClick={() => setPendingDelete(null)}>{t("Cancel")}</Button>
               <Button

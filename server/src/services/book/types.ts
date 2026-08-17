@@ -135,6 +135,26 @@ export interface SegmentPlan {
 
 export type SegmentMode = "chapter" | "duration" | "smart";
 
+/**
+ * Where burned book/chapter titles sit on the cover still.
+ *
+ * Row-major so a 3×3 picker can iterate the list as a grid: corners, edges,
+ * and centre. `bottom` is the default — that is where the overlay first landed.
+ */
+export const COVER_TITLE_POSITIONS = [
+  "top_left",
+  "top",
+  "top_right",
+  "left",
+  "center",
+  "right",
+  "bottom_left",
+  "bottom",
+  "bottom_right",
+] as const;
+export type CoverTitlePosition = (typeof COVER_TITLE_POSITIONS)[number];
+export const DEFAULT_COVER_TITLE_POSITION: CoverTitlePosition = "bottom";
+
 export interface SegmentOptions {
   /**
    * `chapter` gives one video per chapter; `duration` targets a fixed length;

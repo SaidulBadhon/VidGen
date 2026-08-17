@@ -3,8 +3,8 @@
  * Ported from python-version/app/services/voice.py.
  *
  * Voice names carry their engine as a prefix (`siliconflow:`, `gemini:`,
- * `mimo:`, `elevenlabs:`, `chatterbox:`) or are a bare Azure/Edge short name
- * with a `-Female` / `-Male` display suffix.
+ * `mimo:`, `elevenlabs:`, `chatterbox:`, `kokoro:`) or are a bare Azure/Edge
+ * short name with a `-Female` / `-Male` display suffix.
  */
 
 import azureVoices from "../../data/azureVoices.json" with { type: "json" };
@@ -19,6 +19,12 @@ interface AzureVoiceEntry {
   name: string;
   gender: string;
 }
+
+/**
+ * Locales shown in the Azure voice picker. Prefixes match `bn-BD-…`, `en-US-…`.
+ * Widen this when more languages should appear in the UI.
+ */
+export const AZURE_VOICE_LOCALES = ["bn-", "en-"];
 
 /** All bundled Azure/Edge voices as `name-Gender` display strings. */
 export function getAllAzureVoices(filterLocals?: string[]): string[] {
@@ -56,6 +62,7 @@ export const isGeminiVoice = (v: string) => String(v ?? "").startsWith("gemini:"
 export const isMimoVoice = (v: string) => String(v ?? "").startsWith("mimo:");
 export const isElevenlabsVoice = (v: string) => String(v ?? "").startsWith("elevenlabs:");
 export const isChatterboxVoice = (v: string) => String(v ?? "").startsWith("chatterbox:");
+export const isKokoroVoice = (v: string) => String(v ?? "").startsWith("kokoro:");
 
 /**
  * Whether the user explicitly chose "no narration".
@@ -160,6 +167,47 @@ export function getMimoVoices(): string[] {
   return Object.entries(voices).map(([name, gender]) => `mimo:${name}-${gender}`);
 }
 
+/**
+ * Voices bundled with the local Kokoro model, best first.
+ *
+ * The order follows the model card's quality grades (af_heart is the flagship
+ * voice), so the top of the dropdown is also the best-sounding pick. English
+ * only — see services/voice/kokoro.ts for why.
+ */
+export function getKokoroVoices(): string[] {
+  const voices: Record<string, string> = {
+    af_heart: "Female",
+    af_bella: "Female",
+    af_nicole: "Female",
+    bf_emma: "Female",
+    af_aoede: "Female",
+    af_kore: "Female",
+    af_sarah: "Female",
+    am_fenrir: "Male",
+    am_michael: "Male",
+    am_puck: "Male",
+    af_alloy: "Female",
+    af_nova: "Female",
+    bf_isabella: "Female",
+    bm_fable: "Male",
+    bm_george: "Male",
+    af_sky: "Female",
+    af_jessica: "Female",
+    af_river: "Female",
+    bf_alice: "Female",
+    bf_lily: "Female",
+    am_echo: "Male",
+    am_eric: "Male",
+    am_liam: "Male",
+    am_onyx: "Male",
+    bm_daniel: "Male",
+    bm_lewis: "Male",
+    am_santa: "Male",
+    am_adam: "Male",
+  };
+  return Object.entries(voices).map(([name, gender]) => `kokoro:${name}-${gender}`);
+}
+
 /** Chatterbox voices come from the configured server, not a fixed list. */
 export function getChatterboxVoices(): string[] {
   const configured = getSettings().chatterbox.voices ?? [];
@@ -204,7 +252,7 @@ export async function getElevenlabsVoices(apiKey?: string): Promise<string[]> {
 export async function listVoicesForServer(server: string): Promise<string[]> {
   switch (server) {
     case "azure-tts-v2":
-      return getAllAzureVoices().filter((voice) => voice.includes("V2"));
+      return getAllAzureVoices(AZURE_VOICE_LOCALES).filter((voice) => voice.includes("V2"));
     case "siliconflow":
       return getSiliconflowVoices();
     case "gemini":
@@ -215,9 +263,11 @@ export async function listVoicesForServer(server: string): Promise<string[]> {
       return getElevenlabsVoices();
     case "chatterbox":
       return getChatterboxVoices();
+    case "kokoro":
+      return getKokoroVoices();
     case "azure-tts-v1":
     default:
-      return getAllAzureVoices().filter((voice) => !voice.includes("V2"));
+      return getAllAzureVoices(AZURE_VOICE_LOCALES).filter((voice) => !voice.includes("V2"));
   }
 }
 
@@ -228,6 +278,7 @@ export function inferTtsServerFromVoice(voiceName: string): string {
   if (isMimoVoice(voiceName)) return "mimo";
   if (isElevenlabsVoice(voiceName)) return "elevenlabs";
   if (isChatterboxVoice(voiceName)) return "chatterbox";
+  if (isKokoroVoice(voiceName)) return "kokoro";
   if (isAzureV2Voice(voiceName)) return "azure-tts-v2";
   return "azure-tts-v1";
 }

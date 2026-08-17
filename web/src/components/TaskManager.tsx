@@ -9,6 +9,14 @@ import { Download, Loader2, Play, RotateCcw, Trash2, XCircle } from "lucide-reac
 import { api, type Task } from "../api/client.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Badge, Button, Card, Dialog, Progress, Select } from "./ui.tsx";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 const TASK_STATE_FAILED = -1;
 const TASK_STATE_COMPLETE = 1;
@@ -97,100 +105,96 @@ export function TaskManager({ onRestoreParams }: { onRestoreParams?: (params: Re
           {tasks.length === 0 ? t("No Tasks Yet") : t("No Tasks Match Filter")}
         </p>
       ) : (
-        <div className="scroll-x">
-          <table className="w-full min-w-[720px] border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-xs text-muted">
-                <th className="pb-2 pr-3 font-medium">{t("Task Status")}</th>
-                <th className="pb-2 pr-3 font-medium">{t("Task Updated At")}</th>
-                <th className="pb-2 pr-3 font-medium">{t("Task Subject")}</th>
-                <th className="pb-2 pr-3 font-medium">{t("Task Progress")}</th>
-                <th className="pb-2 font-medium">{t("Task Actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((task) => {
-                const status = statusOf(task);
-                const subject = String(task.params?.video_subject ?? task.script ?? task.task_id);
-                const video = task.videos?.[0];
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>{t("Task Status")}</TableHead>
+              <TableHead>{t("Task Updated At")}</TableHead>
+              <TableHead>{t("Task Subject")}</TableHead>
+              <TableHead>{t("Task Progress")}</TableHead>
+              <TableHead>{t("Task Actions")}</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {filtered.map((task) => {
+              const status = statusOf(task);
+              const subject = String(task.params?.video_subject ?? task.script ?? task.task_id);
+              const video = task.videos?.[0];
 
-                return (
-                  <tr key={task.task_id} className="border-b border-border/60 last:border-0">
-                    <td className="py-2.5 pr-3 align-middle">
-                      <Badge
-                        tone={
-                          status === "complete" ? "success" : status === "failed" ? "danger" : "accent"
-                        }
-                      >
-                        {status === "complete"
-                          ? t("Task Status Complete")
-                          : status === "failed"
-                            ? t("Task Status Failed")
-                            : t("Task Status Processing")}
-                      </Badge>
-                    </td>
-                    <td className="py-2.5 pr-3 align-middle whitespace-nowrap text-xs text-muted">
-                      {formatTime(task.updated_at)}
-                    </td>
-                    <td className="py-2.5 pr-3 align-middle" title={subject}>
-                      {truncate(subject)}
-                      {task.error && <div className="text-xs text-danger">{truncate(task.error, 60)}</div>}
-                    </td>
-                    <td className="w-28 py-2.5 pr-3 align-middle">
-                      <Progress value={task.progress} />
-                      <span className="text-xs tabular-nums text-muted">{task.progress}%</span>
-                    </td>
-                    <td className="py-2.5 align-middle">
-                      <div className="flex items-center gap-1">
-                        {video && (
-                          <>
-                            <Button variant="ghost" size="sm" title={t("Play")} onClick={() => setPreview(task)}>
-                              <Play size={14} />
+              return (
+                <TableRow key={task.task_id}>
+                  <TableCell>
+                    <Badge
+                      tone={
+                        status === "complete" ? "success" : status === "failed" ? "danger" : "accent"
+                      }
+                    >
+                      {status === "complete"
+                        ? t("Task Status Complete")
+                        : status === "failed"
+                          ? t("Task Status Failed")
+                          : t("Task Status Processing")}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{formatTime(task.updated_at)}</TableCell>
+                  <TableCell title={subject}>
+                    {truncate(subject)}
+                    {task.error && <div className="text-xs text-destructive">{truncate(task.error, 60)}</div>}
+                  </TableCell>
+                  <TableCell className="w-28">
+                    <Progress value={task.progress} />
+                    <span className="text-xs tabular-nums text-muted-foreground">{task.progress}%</span>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex items-center gap-1">
+                      {video && (
+                        <>
+                          <Button variant="ghost" size="sm" title={t("Play")} onClick={() => setPreview(task)}>
+                            <Play size={14} />
+                          </Button>
+                          <a href={video} download className="inline-flex">
+                            <Button variant="ghost" size="sm" title={t("Download")}>
+                              <Download size={14} />
                             </Button>
-                            <a href={video} download className="inline-flex">
-                              <Button variant="ghost" size="sm" title={t("Download")}>
-                                <Download size={14} />
-                              </Button>
-                            </a>
-                          </>
-                        )}
-                        {task.params && onRestoreParams && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            title={t("Restore Parameters")}
-                            onClick={() => onRestoreParams(task.params!)}
-                          >
-                            <RotateCcw size={14} />
-                          </Button>
-                        )}
-                        {status === "processing" ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            title={t("Cancel")}
-                            onClick={() => cancel.mutate(task.task_id)}
-                          >
-                            <XCircle size={14} />
-                          </Button>
-                        ) : (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            title={t("Delete")}
-                            onClick={() => remove.mutate(task.task_id)}
-                          >
-                            <Trash2 size={14} className="text-danger" />
-                          </Button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                          </a>
+                        </>
+                      )}
+                      {task.params && onRestoreParams && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title={t("Restore Parameters")}
+                          onClick={() => onRestoreParams(task.params!)}
+                        >
+                          <RotateCcw size={14} />
+                        </Button>
+                      )}
+                      {status === "processing" ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title={t("Cancel")}
+                          onClick={() => cancel.mutate(task.task_id)}
+                        >
+                          <XCircle size={14} />
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          title={t("Delete")}
+                          onClick={() => remove.mutate(task.task_id)}
+                        >
+                          <Trash2 size={14} className="text-destructive" />
+                        </Button>
+                      )}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              );
+            })}
+          </TableBody>
+        </Table>
       )}
 
       {remove.isError && <p className="mt-2 text-xs text-danger">{(remove.error as Error).message}</p>}

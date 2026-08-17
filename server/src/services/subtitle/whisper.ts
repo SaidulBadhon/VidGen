@@ -17,7 +17,7 @@
 import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { rename, unlink } from "node:fs/promises";
-import { getSettings } from "../../config/settings.ts";
+import { getSettings, resolveContentLanguage } from "../../config/settings.ts";
 import { logger, errorMessage } from "../../utils/logger.ts";
 import { modelsDir } from "../../utils/paths.ts";
 import { runFfmpeg } from "../video/ffmpeg.ts";
@@ -120,6 +120,7 @@ async function transcribeWithWhisperCpp(audioFile: string): Promise<SubtitleCue[
   const modelPath = await ensureWhisperModel(whisper.model_size);
   const wavPath = await toWhisperWav(audioFile);
   const outputBase = `${audioFile}.whisper`;
+  const language = resolveContentLanguage(whisper.language);
 
   try {
     logger.info(`transcribing with whisper.cpp: model=${whisper.model_size}`);
@@ -131,7 +132,8 @@ async function transcribeWithWhisperCpp(audioFile: string): Promise<SubtitleCue[
       "--output-srt",
       "--output-file",
       outputBase,
-      ...(whisper.language ? ["--language", whisper.language] : ["--language", "auto"]),
+      "--language",
+      language || "auto",
       ...(whisper.initial_prompt ? ["--prompt", whisper.initial_prompt] : []),
     ]);
 
@@ -173,7 +175,8 @@ async function transcribeWithOpenAiApi(audioFile: string): Promise<SubtitleCue[]
   form.append("model", whisper.api_model || "whisper-1");
   // SRT comes back ready to parse, avoiding a second timing format.
   form.append("response_format", "srt");
-  if (whisper.language) form.append("language", whisper.language);
+  const language = resolveContentLanguage(whisper.language);
+  if (language) form.append("language", language);
   if (whisper.initial_prompt) form.append("prompt", whisper.initial_prompt);
 
   logger.info(`transcribing with OpenAI-compatible endpoint: ${baseUrl}`);

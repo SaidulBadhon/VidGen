@@ -226,6 +226,7 @@
     "Hide Basic Settings": "Sembunyikan Pengaturan Dasar\n\nTersembunyi, panel pengaturan dasar tidak akan ditampilkan di halaman.\n\nJika Anda perlu menampilkannya lagi, silakan atur `hide_config = false` di `config.toml`",
     "LLM Settings": "**Pengaturan LLM**",
     "LLM Settings Tab": "Pengaturan LLM",
+    "Narration Settings Tab": "Narasi",
     "Material API Tab": "API Materi",
     "Interface Settings Tab": "Pengaturan Antarmuka",
     "Cache Management Tab": "Manajemen Cache",

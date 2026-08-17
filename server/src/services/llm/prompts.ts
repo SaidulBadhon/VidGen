@@ -5,6 +5,26 @@
 
 import { logger } from "../../utils/logger.ts";
 
+/** English labels used in prompts so the model is not guessing from a code. */
+const LANGUAGE_LABELS: Record<string, string> = {
+  en: "English",
+  zh: "Simplified Chinese",
+  bn: "Bengali",
+  de: "German",
+  es: "Spanish",
+  id: "Indonesian",
+  pt: "Portuguese",
+  ru: "Russian",
+  tr: "Turkish",
+  vi: "Vietnamese",
+};
+
+export function languageLabel(code: string): string {
+  const normalized = code.trim();
+  if (!normalized) return "";
+  return LANGUAGE_LABELS[normalized] ?? LANGUAGE_LABELS[normalized.toLowerCase()] ?? normalized;
+}
+
 export const MIN_SCRIPT_PARAGRAPH_NUMBER = 1;
 export const MAX_SCRIPT_PARAGRAPH_NUMBER = 10;
 export const MAX_SCRIPT_PROMPT_LENGTH = 2000;
@@ -73,9 +93,18 @@ export function buildScriptPrompt(options: {
     "custom_system_prompt",
   );
 
+  const language = (options.language || "").trim();
+  const languageName = languageLabel(language);
+
   let prompt = customSystemPrompt || DEFAULT_SCRIPT_SYSTEM_PROMPT;
+  if (languageName && !customSystemPrompt) {
+    prompt = prompt.replace(
+      "8. respond in the same language as the video subject.",
+      `8. write the entire script in ${languageName}. Do not use any other language.`,
+    );
+  }
   prompt += `\n\n# Initialization:\n- video subject: ${options.videoSubject}\n- number of paragraphs: ${paragraphNumber}`;
-  if (options.language) prompt += `\n- language: ${options.language}`;
+  if (languageName) prompt += `\n- language: ${languageName}`;
   if (videoScriptPrompt) prompt += `\n\n# Additional User Requirements:\n${videoScriptPrompt}`;
 
   return prompt;
@@ -336,9 +365,10 @@ Mark the real chapter and section starts that a listener should hear. Do not tur
 5. Sections are genuine narrative starts only — the first body occurrence of a chapter or titled section, never its table-of-contents echo. Do not start a section at the first outline id just because it is first.
 6. The first section should be the first real chapter or section of the book body (or a narratable prologue/preface). Title and author lines before that may stay; the contents list must not.
 7. Prefer published chapter titles (Chapter I, Book the First, I. The Period, and similar) over generic "Part N" labels. Title text is the chapter/section name only — do not repeat the book title or author in the title field.
-8. Do NOT slice the book into equal ${options.targetSeconds}-second chunks. Length is handled later. Your job is only to mark genuine starts and unread ids.
-9. Titles at most ${MAX_SEGMENT_TITLE_LENGTH} characters, in the book's language, without surrounding quotes.
-10. Include a section start when the outline kind is "heading" or "marker" and the title looks like a real chapter or book division that is followed by body text. You may also start a section at a "prose" id when a scene clearly changes and no heading is present.${chunkNote}
+8. A heading that is only a number (1, 12, I) is a chapter start, not a page number. Title it "Chapter N". If the next outline line is a name or year (Camilla, 2009), keep that number as the start and put the name after it: "Chapter 8 — Camilla". Do not skip numbered chapter headings.
+9. Do NOT slice the book into equal ${options.targetSeconds}-second chunks. Length is handled later. Your job is only to mark genuine starts and unread ids.
+10. Titles at most ${MAX_SEGMENT_TITLE_LENGTH} characters, in the book's language, without surrounding quotes.
+11. Include a section start when the outline kind is "heading" or "marker" and the title looks like a real chapter or book division that is followed by body text. Every numbered chapter heading in the body must be a section start. You may also start a section at a "prose" id when a scene clearly changes and no heading is present.${chunkNote}
 
 ## Length context
 - Target video length: ${options.targetSeconds} seconds

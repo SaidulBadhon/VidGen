@@ -182,11 +182,25 @@ export const chatterboxSettingsSchema = z.object({
   voices: z.array(z.string()).default(["default-Female"]),
 });
 
+export const kokoroSettingsSchema = z.object({
+  /**
+   * Quantisation of the local model. q8 (~90 MB) is near-indistinguishable
+   * from fp32 (~310 MB) and roughly twice as fast on CPU; changing this
+   * triggers a one-time download of the new variant.
+   */
+  dtype: z.enum(["q8", "fp32", "fp16", "q4", "q4f16"]).default("q8"),
+});
+
 export const uiSettingsSchema = z.object({
   hide_log: z.boolean().default(false),
   open_task_folder_on_completion: z.boolean().default(true),
+  /** App-wide UI and generation language (ISO 639-1). Empty until first save. */
   language: z.string().default(""),
   tts_server: z.string().default("azure-tts-v1"),
+  /**
+   * Default narration voice for short videos and audiobooks. Empty falls back
+   * to `DEFAULT_VOICE_NAME` at generation time so first boot still speaks.
+   */
   voice_name: z.string().default(""),
   font_name: z.string().default("MicrosoftYaHeiBold.ttc"),
   font_size: z.number().default(60),
@@ -208,6 +222,7 @@ export const settingsSchema = z.object({
   siliconflow: siliconflowSettingsSchema.default({}),
   elevenlabs: elevenlabsSettingsSchema.default({}),
   chatterbox: chatterboxSettingsSchema.default({}),
+  kokoro: kokoroSettingsSchema.default({}),
   ui: uiSettingsSchema.default({}),
 });
 
@@ -218,6 +233,7 @@ export type AzureSettings = z.infer<typeof azureSettingsSchema>;
 export type SiliconflowSettings = z.infer<typeof siliconflowSettingsSchema>;
 export type ElevenlabsSettings = z.infer<typeof elevenlabsSettingsSchema>;
 export type ChatterboxSettings = z.infer<typeof chatterboxSettingsSchema>;
+export type KokoroSettings = z.infer<typeof kokoroSettingsSchema>;
 export type UiSettings = z.infer<typeof uiSettingsSchema>;
 export type Settings = z.infer<typeof settingsSchema>;
 
@@ -253,3 +269,6 @@ export const SECRET_FIELDS: ReadonlyArray<[SettingsSection, string]> = [
 ];
 
 export { SUPPORTED_VIDEO_CODECS };
+
+/** Used when settings have no voice and the request did not name one. */
+export const DEFAULT_VOICE_NAME = "en-US-AriaNeural-Female";

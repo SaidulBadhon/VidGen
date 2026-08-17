@@ -229,6 +229,7 @@
     "Hide Basic Settings": "Basis-Einstellungen ausblenden\n\nWenn diese Option deaktiviert ist, wird die Basis-Einstellungen-Leiste nicht auf der Seite angezeigt.\n\nWenn Sie sie erneut anzeigen möchten, setzen Sie `hide_config = false` in `config.toml`",
     "LLM Settings": "**LLM-Einstellungen**",
     "LLM Settings Tab": "LLM-Einstellungen",
+    "Narration Settings Tab": "Erzählung",
     "Material API Tab": "Material-APIs",
     "Interface Settings Tab": "Oberflächeneinstellungen",
     "Cache Management Tab": "Cache-Verwaltung",

@@ -1,99 +1,183 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
-/*
- * Theme tokens.
- *
- * Defined on bare :root so light is the baseline, then overridden for the
- * system dark preference and again for an explicit toggle, so neither can
- * strand a colour undefined.
- */
+@custom-variant dark (&:is(.dark *));
+
 :root {
   color-scheme: light;
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --surface-2: #f1f3f5;
-  --border: #e2e5e9;
-  --text: #14171a;
-  --text-muted: #667085;
-  --accent: #2f6fed;
-  --accent-fg: #ffffff;
-  --danger: #d64545;
+  --radius: 0.625rem;
+
+  --background: #f4f5f7;
+  --foreground: #14171a;
+  --card: #ffffff;
+  --card-foreground: #14171a;
+  --popover: #ffffff;
+  --popover-foreground: #14171a;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --secondary: #eef0f3;
+  --secondary-foreground: #14171a;
+  --muted: #eef0f3;
+  --muted-foreground: #667085;
+  --accent: #eef0f3;
+  --accent-foreground: #14171a;
+  --destructive: #d64545;
   --success: #2c9c5f;
   --warning: #c98a1b;
+  --border: #e2e5e9;
+  --input: #e2e5e9;
+  --ring: #2563eb;
+
+  --sidebar: #ffffff;
+  --sidebar-foreground: #14171a;
+  --sidebar-primary: #2563eb;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef0f3;
+  --sidebar-accent-foreground: #14171a;
+  --sidebar-border: #e2e5e9;
+  --sidebar-ring: #2563eb;
+
+  /* Legacy aliases used by existing screens. */
+  --bg: var(--background);
+  --surface: var(--card);
+  --surface-2: var(--muted);
+  --text: var(--foreground);
+  --text-muted: var(--muted-foreground);
+  --accent-brand: var(--primary);
+  --accent-fg: var(--primary-foreground);
+  --danger: var(--destructive);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #0e1116;
-    --surface: #161a21;
-    --surface-2: #1d222b;
-    --border: #2a3039;
-    --text: #e6e9ef;
-    --text-muted: #98a2b3;
-    --accent: #5b8def;
-    --accent-fg: #0b0e13;
-    --danger: #f2726f;
-    --success: #4ec98a;
-    --warning: #e0ad48;
-  }
-}
-
-:root[data-theme="dark"] {
+.dark {
   color-scheme: dark;
-  --bg: #0e1116;
-  --surface: #161a21;
-  --surface-2: #1d222b;
-  --border: #2a3039;
-  --text: #e6e9ef;
-  --text-muted: #98a2b3;
-  --accent: #5b8def;
-  --accent-fg: #0b0e13;
-  --danger: #f2726f;
+  --background: #0c0e12;
+  --foreground: #e6e9ef;
+  --card: #14181f;
+  --card-foreground: #e6e9ef;
+  --popover: #14181f;
+  --popover-foreground: #e6e9ef;
+  --primary: #5b8def;
+  --primary-foreground: #0b0e13;
+  --secondary: #1d222b;
+  --secondary-foreground: #e6e9ef;
+  --muted: #1d222b;
+  --muted-foreground: #98a2b3;
+  --accent: #1d222b;
+  --accent-foreground: #e6e9ef;
+  --destructive: #f2726f;
   --success: #4ec98a;
   --warning: #e0ad48;
+  --border: #2a3039;
+  --input: #2a3039;
+  --ring: #5b8def;
+
+  --sidebar: #10141a;
+  --sidebar-foreground: #e6e9ef;
+  --sidebar-primary: #5b8def;
+  --sidebar-primary-foreground: #0b0e13;
+  --sidebar-accent: #1d222b;
+  --sidebar-accent-foreground: #e6e9ef;
+  --sidebar-border: #2a3039;
+  --sidebar-ring: #5b8def;
 }
 
 @theme inline {
-  --color-bg: var(--bg);
-  --color-surface: var(--surface);
-  --color-surface-2: var(--surface-2);
-  --color-border: var(--border);
-  --color-text: var(--text);
-  --color-muted: var(--text-muted);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
-  --color-accent-fg: var(--accent-fg);
-  --color-danger: var(--danger);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
   --color-success: var(--success);
   --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --color-bg: var(--background);
+  --color-surface: var(--card);
+  --color-surface-2: var(--muted);
+  --color-text: var(--foreground);
+  --color-accent-fg: var(--primary-foreground);
+  --color-danger: var(--destructive);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
 }
 
-html,
-body,
-#root {
-  height: 100%;
+/* Existing screens use text-muted for secondary copy. Keep that working
+   even though --color-muted is now the muted *background* token. */
+@utility text-muted {
+  color: var(--muted-foreground);
 }
 
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  -webkit-font-smoothing: antialiased;
+@utility text-accent {
+  color: var(--primary);
 }
 
-/* Wide content scrolls inside its own container, never the page body. */
+@utility border-accent {
+  border-color: var(--primary);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+      "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+}
+
 .scroll-x {
   overflow-x: auto;
   max-width: 100%;
 }
 
 input[type="range"] {
-  accent-color: var(--accent);
+  accent-color: var(--primary);
 }
 
 audio.audio-preview {
   height: 2.25rem;
   border-radius: 0.5rem;
+}
+
+/* Unlayered so these win over the theme's `text-muted` / `text-accent`
+   utilities, which otherwise paint with the *background* tokens. */
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.text-accent {
+  color: var(--primary);
 }

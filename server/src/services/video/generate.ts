@@ -26,6 +26,7 @@ import { shouldUseBgm } from "../bgm.ts";
 import { logger, errorMessage } from "../../utils/logger.ts";
 import { fontDir } from "../../utils/paths.ts";
 import { aspectToResolution, type VideoParams } from "../../models/schema.ts";
+import { resolveContentLanguage } from "../../config/settings.ts";
 
 export const AUDIO_CODEC = "aac";
 
@@ -382,7 +383,7 @@ export async function generateVideo(options: GenerateVideoOptions): Promise<Gene
         videoPath: softIntermediate,
         subtitlePath,
         outputFile,
-        language: params.video_language,
+        language: resolveContentLanguage(params.video_language),
         signal,
       });
       await deleteFiles([softIntermediate]);

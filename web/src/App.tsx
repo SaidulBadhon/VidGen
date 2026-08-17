@@ -1,81 +1,49 @@
 /**
- * Shell: shared chrome and the two tools as real routes.
+ * Shell: collapsible sidebar, header, and the product routes.
  *
- * Language and basic settings live here so switching between short video and
- * audiobook does not dump them. Each tool owns the rest of its own state.
+ * Language and theme live in the chrome so switching tools does not dump them.
+ * Each tool owns the rest of its own state.
  */
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { BookOpen, ChevronDown, ChevronUp, Clapperboard } from "lucide-react";
-import { NavLink, Navigate, Outlet, Route, Routes } from "react-router-dom";
-import { api } from "./api/client.ts";
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
+import { AppHeader } from "./components/app-header.tsx";
+import { AppSidebar } from "./components/app-sidebar.tsx";
+import { CommandMenu, CommandMenuProvider } from "./components/command-menu.tsx";
+import { SidebarInset, SidebarProvider } from "./components/ui/sidebar";
 import { BookScreen } from "./book/BookScreen.tsx";
 import { LibraryScreen } from "./book/LibraryScreen.tsx";
-import { SettingsPanel } from "./components/SettingsPanel.tsx";
-import { Badge, Button, Select, buttonClass } from "./components/ui.tsx";
-import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES, useI18n } from "./i18n/index.tsx";
+import { CacheSettingsPage } from "./settings/cache.tsx";
+import { InterfaceSettingsPage } from "./settings/interface.tsx";
+import { SettingsLayout } from "./settings/layout.tsx";
+import { LlmSettingsPage } from "./settings/llm.tsx";
+import { MaterialsSettingsPage } from "./settings/materials.tsx";
+import { NarrationSettingsPage } from "./settings/narration.tsx";
+import { TasksPage } from "./pages/TasksPage.tsx";
 import { VideoScreen } from "./video/VideoScreen.tsx";
 
 function AppLayout() {
-  const { t, language, setLanguage } = useI18n();
-  const [showSettings, setShowSettings] = useState(false);
-  const health = useQuery({ queryKey: ["health"], queryFn: api.health });
+  const { pathname } = useLocation();
+  const settings = pathname.startsWith("/settings");
 
   return (
-    <div className="mx-auto max-w-[1400px] px-4 py-6">
-      <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-baseline gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">VidGen 🎬</h1>
-          {health.data && (
-            <Badge tone={health.data.database === "ok" && health.data.ffmpeg === "ok" ? "success" : "danger"}>
-              v{health.data.version}
-            </Badge>
+    <CommandMenuProvider>
+      <SidebarProvider className="h-full">
+        <AppSidebar />
+        <SidebarInset className="min-h-0 overflow-hidden">
+          <AppHeader />
+          {settings ? (
+            <Outlet />
+          ) : (
+            <div className="flex-1 overflow-auto">
+              <div className="mx-auto w-full max-w-[1400px] p-4 md:p-6">
+                <Outlet />
+              </div>
+            </div>
           )}
-          {health.data && health.data.ffmpeg !== "ok" && <Badge tone="danger">ffmpeg missing</Badge>}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <nav className="flex items-center gap-1 rounded-lg border border-border bg-surface-2 p-1">
-            <NavLink
-              to="/"
-              end
-              className={({ isActive }) => buttonClass({ size: "sm", variant: isActive ? "primary" : "ghost" })}
-            >
-              <Clapperboard size={14} />
-              {t("Mode Short Video")}
-            </NavLink>
-            <NavLink
-              to="/books"
-              className={({ isActive }) => buttonClass({ size: "sm", variant: isActive ? "primary" : "ghost" })}
-            >
-              <BookOpen size={14} />
-              {t("Mode Audiobook")}
-            </NavLink>
-          </nav>
-
-          <div className="w-40">
-            <Select
-              value={language}
-              onValueChange={setLanguage}
-              options={SUPPORTED_LANGUAGES.map((code) => ({ value: code, label: LANGUAGE_NAMES[code] ?? code }))}
-            />
-          </div>
-          <Button size="sm" onClick={() => setShowSettings((current) => !current)}>
-            {showSettings ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            {t("Basic Settings")}
-          </Button>
-        </div>
-      </header>
-
-      {showSettings && (
-        <div className="mb-5">
-          <SettingsPanel />
-        </div>
-      )}
-
-      <Outlet />
-    </div>
+        </SidebarInset>
+        <CommandMenu />
+      </SidebarProvider>
+    </CommandMenuProvider>
   );
 }
 
@@ -86,6 +54,15 @@ export default function App() {
         <Route index element={<VideoScreen />} />
         <Route path="books" element={<LibraryScreen />} />
         <Route path="books/:bookId/:step?" element={<BookScreen />} />
+        <Route path="tasks" element={<TasksPage />} />
+        <Route path="settings" element={<SettingsLayout />}>
+          <Route index element={<Navigate to="llm" replace />} />
+          <Route path="llm" element={<LlmSettingsPage />} />
+          <Route path="narration" element={<NarrationSettingsPage />} />
+          <Route path="materials" element={<MaterialsSettingsPage />} />
+          <Route path="cache" element={<CacheSettingsPage />} />
+          <Route path="interface" element={<InterfaceSettingsPage />} />
+        </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

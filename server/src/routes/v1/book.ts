@@ -18,7 +18,7 @@ import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
-import { appConfig } from "../../config/settings.ts";
+import { appConfig, resolveVoiceName } from "../../config/settings.ts";
 import {
   applyBlockEdits,
   bookDir,
@@ -970,9 +970,17 @@ bookRouter.get("/books/:id/cover", async (c) => {
 bookRouter.post("/books/:id/render", async (c) => {
   const bookId = c.req.param("id");
   const book = await requireBook(bookId);
-  // An absent body should surface as "voice_name is required", not as a JSON
-  // parse error the caller cannot act on.
-  const request = bookRenderRequestSchema.parse(await c.req.json().catch(() => ({})));
+  // An absent or empty voice uses the app-wide default from settings so the
+  // selector on the settings page applies here without the caller restating it.
+  const raw = await c.req.json().catch(() => ({}));
+  const body =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  if (!String(body.voice_name ?? "").trim()) {
+    body.voice_name = resolveVoiceName("");
+  }
+  const request = bookRenderRequestSchema.parse(body);
 
   const segments = await listBookSegments(bookId);
   if (segments.length === 0) throw badRequest("this book has no segments to render", bookId);

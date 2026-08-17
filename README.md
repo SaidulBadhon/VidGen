@@ -122,15 +122,17 @@ precedence over it, which is how `docker compose` passes these through.
 | Kind | Supported |
 |---|---|
 | LLM | Google Gemini, OpenAI / ChatGPT, Gemma via Ollama — all through the [Vercel AI SDK](https://sdk.vercel.ai) |
-| TTS | Edge TTS (free, default), Azure Speech V2, SiliconFlow, Gemini TTS, Xiaomi MiMo, ElevenLabs, Chatterbox, and `no-voice` |
+| TTS | Edge TTS (free, default), Kokoro (free, fully local, English), Azure Speech V2, SiliconFlow, Gemini TTS, Xiaomi MiMo, ElevenLabs, Chatterbox, and `no-voice` |
 | Stock video | Pexels, Pixabay, Coverr, or your own local files |
 | AI music | Sonilo, ElevenLabs Music |
 | Subtitles | TTS word boundaries (`edge`), or Whisper transcription |
 | Publishing | TikTok, Instagram and YouTube Shorts via [upload-post.com](https://upload-post.com) |
 | Reranking | TwelveLabs Marengo (optional) |
 
-Edge TTS and the bundled music library need no keys at all, so a local install can
-produce a video from a script with nothing configured.
+Edge TTS, Kokoro and the bundled music library need no keys at all, so a local
+install can produce a video from a script with nothing configured. Kokoro runs the
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) model on your own CPU
+(~90 MB download on first use), so narration keeps working entirely offline.
 
 ---
 

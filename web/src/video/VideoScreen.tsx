@@ -8,10 +8,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Sparkles, Upload, Wand2 } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { api, subscribeToTask, type Task } from "../api/client.ts";
-import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES, useI18n } from "../i18n/index.tsx";
-import { BgmPreview, VoicePreview } from "../components/AudioPreview.tsx";
+import { useI18n } from "../i18n/index.tsx";
+import { BgmPreview, VoicePreview, useVoiceSampleTrigger } from "../components/AudioPreview.tsx";
+import { PageHeader } from "../components/page-header.tsx";
 import { TaskManager } from "../components/TaskManager.tsx";
+import { VoiceSelector } from "../components/voice-selector.tsx";
+import { DEFAULT_TTS_SERVER, DEFAULT_VOICE_NAME, inferTtsServerFromVoice, voiceFromSettings } from "../lib/voices.ts";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "../components/ui/accordion";
+import { Checkbox } from "../components/ui/checkbox";
+import { Separator } from "../components/ui/separator";
 import {
   Alert,
   Badge,
@@ -43,7 +55,7 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   video_source: "pexels",
   video_materials: [],
   video_language: "",
-  voice_name: "en-US-AriaNeural-Female",
+  voice_name: DEFAULT_VOICE_NAME,
   voice_volume: 1.0,
   voice_rate: 1.0,
   bgm_type: "random",
@@ -66,33 +78,29 @@ const DEFAULT_PARAMS: Record<string, unknown> = {
   custom_system_prompt: "",
 };
 
-const TTS_SERVERS = [
-  "azure-tts-v1",
-  "azure-tts-v2",
-  "siliconflow",
-  "gemini",
-  "mimo",
-  "elevenlabs",
-  "chatterbox",
-];
-
 export function VideoScreen() {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const queryClient = useQueryClient();
+  const location = useLocation();
+  const navigate = useNavigate();
 
   const [params, setParams] = useState<Record<string, unknown>>({ ...DEFAULT_PARAMS });
-  const [ttsServer, setTtsServer] = useState("azure-tts-v1");
+  const [ttsServer, setTtsServer] = useState<string>(DEFAULT_TTS_SERVER);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [promptPreview, setPromptPreview] = useState<string | null>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
+  const restoredRef = useRef(false);
+  const settingsAppliedRef = useRef(false);
 
   const set = useCallback((key: string, value: unknown) => {
     setParams((current) => ({ ...current, [key]: value }));
   }, []);
+  const setVoiceName = useCallback((value: string) => set("voice_name", value), [set]);
+  const { autoPlayKey, requestSample } = useVoiceSampleTrigger();
 
   const metadata = useQuery({ queryKey: ["settings-metadata"], queryFn: api.getSettingsMetadata });
-  const voices = useQuery({ queryKey: ["voices", ttsServer], queryFn: () => api.listVoices(ttsServer) });
+  const settings = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
   const musics = useQuery({ queryKey: ["musics"], queryFn: api.listMusics });
   const materials = useQuery({ queryKey: ["materials"], queryFn: api.listMaterials });
 
@@ -100,11 +108,29 @@ export function VideoScreen() {
   // an open SSE connection behind.
   useEffect(() => () => unsubscribeRef.current?.(), []);
 
+  useEffect(() => {
+    const restored = (location.state as { restoreParams?: Record<string, unknown> } | null)?.restoreParams;
+    if (!restored) return;
+    restoredRef.current = true;
+    setParams({ ...DEFAULT_PARAMS, ...restored });
+    const restoredVoice = String(restored.voice_name ?? "").trim();
+    if (restoredVoice) setTtsServer(inferTtsServerFromVoice(restoredVoice));
+    navigate(".", { replace: true, state: {} });
+  }, [location.state, navigate]);
+
+  useEffect(() => {
+    if (restoredRef.current || settingsAppliedRef.current || !settings.isSuccess) return;
+    settingsAppliedRef.current = true;
+    const { voiceName, ttsServer: server } = voiceFromSettings(settings.data.ui);
+    setParams((current) => ({ ...current, voice_name: voiceName }));
+    setTtsServer(server);
+  }, [settings.isSuccess, settings.data]);
+
   const generateScript = useMutation({
     mutationFn: () =>
       api.generateScript({
         video_subject: String(params.video_subject ?? ""),
-        video_language: String(params.video_language ?? ""),
+        video_language: language,
         paragraph_number: Number(params.paragraph_number ?? 1),
         video_script_prompt: String(params.video_script_prompt ?? ""),
         custom_system_prompt: String(params.custom_system_prompt ?? ""),
@@ -127,7 +153,7 @@ export function VideoScreen() {
     mutationFn: () =>
       api.previewPrompt({
         video_subject: String(params.video_subject ?? ""),
-        video_language: String(params.video_language ?? ""),
+        video_language: language,
         paragraph_number: Number(params.paragraph_number ?? 1),
         video_script_prompt: String(params.video_script_prompt ?? ""),
         custom_system_prompt: String(params.custom_system_prompt ?? ""),
@@ -137,7 +163,7 @@ export function VideoScreen() {
 
   const createVideo = useMutation({
     mutationFn: () => {
-      const body = { ...params };
+      const body: Record<string, unknown> = { ...params, video_language: language };
       // Local mode sends the chosen filenames; the server resolves them inside
       // the materials directory.
       if (body.video_source === "local") {
@@ -179,6 +205,8 @@ export function VideoScreen() {
 
   return (
     <>
+      <PageHeader title={t("Mode Short Video")} description={t("Studio Description")} />
+
       <div className="grid gap-4 lg:grid-cols-3">
         {/* ---------------------------------------------------------------- */}
         <Card title={t("Video Script Settings")}>
@@ -191,55 +219,48 @@ export function VideoScreen() {
               />
             </Field>
 
-            <Field label={t("Script Language")}>
-              <Select
-                value={String(params.video_language ?? "")}
-                onValueChange={(value) => set("video_language", value)}
-                options={[
-                  { value: "", label: t("Auto Detect") },
-                  ...SUPPORTED_LANGUAGES.map((code) => ({ value: code, label: LANGUAGE_NAMES[code] ?? code })),
-                ]}
-              />
-            </Field>
-
-            <details className="rounded-lg border border-border bg-surface-2 p-3">
-              <summary className="cursor-pointer text-xs font-medium text-muted">
-                {t("Advanced Script Settings")}
-              </summary>
-              <div className="mt-3 space-y-3">
-                <Field label={t("Script Paragraph Number")}>
-                  <NumberInput
-                    min={1}
-                    max={10}
-                    value={Number(params.paragraph_number ?? 1)}
-                    onChange={(event) => set("paragraph_number", Number(event.target.value))}
-                  />
-                </Field>
-                <Field label={t("Custom Script Requirements")}>
-                  <TextArea
-                    rows={3}
-                    value={String(params.video_script_prompt ?? "")}
-                    placeholder={t("Custom Script Requirements Placeholder")}
-                    onChange={(event) => set("video_script_prompt", event.target.value)}
-                  />
-                </Field>
-                <Field label={t("Custom System Prompt")}>
-                  <TextArea
-                    rows={4}
-                    value={String(params.custom_system_prompt ?? "")}
-                    onChange={(event) => set("custom_system_prompt", event.target.value)}
-                  />
-                </Field>
-                <Button size="sm" disabled={previewPrompt.isPending} onClick={() => previewPrompt.mutate()}>
-                  {t("Preview Final Prompt")}
-                </Button>
-                {promptPreview && (
-                  <pre className="scroll-x max-h-52 overflow-auto rounded-lg border border-border bg-surface p-2 text-xs whitespace-pre-wrap">
-                    {promptPreview}
-                  </pre>
-                )}
-              </div>
-            </details>
+            <Accordion type="single" collapsible className="rounded-lg border bg-muted/40 px-3">
+              <AccordionItem value="advanced" className="border-0">
+                <AccordionTrigger className="py-3 text-xs text-muted-foreground hover:no-underline">
+                  {t("Advanced Script Settings")}
+                </AccordionTrigger>
+                <AccordionContent>
+                  <div className="space-y-3">
+                    <Field label={t("Script Paragraph Number")}>
+                      <NumberInput
+                        min={1}
+                        max={10}
+                        value={Number(params.paragraph_number ?? 1)}
+                        onChange={(event) => set("paragraph_number", Number(event.target.value))}
+                      />
+                    </Field>
+                    <Field label={t("Custom Script Requirements")}>
+                      <TextArea
+                        rows={3}
+                        value={String(params.video_script_prompt ?? "")}
+                        placeholder={t("Custom Script Requirements Placeholder")}
+                        onChange={(event) => set("video_script_prompt", event.target.value)}
+                      />
+                    </Field>
+                    <Field label={t("Custom System Prompt")}>
+                      <TextArea
+                        rows={4}
+                        value={String(params.custom_system_prompt ?? "")}
+                        onChange={(event) => set("custom_system_prompt", event.target.value)}
+                      />
+                    </Field>
+                    <Button size="sm" disabled={previewPrompt.isPending} onClick={() => previewPrompt.mutate()}>
+                      {t("Preview Final Prompt")}
+                    </Button>
+                    {promptPreview && (
+                      <pre className="scroll-x max-h-52 overflow-auto rounded-lg border bg-card p-2 text-xs whitespace-pre-wrap">
+                        {promptPreview}
+                      </pre>
+                    )}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
 
             <Button
               className="w-full"
@@ -294,9 +315,9 @@ export function VideoScreen() {
             </Field>
 
             {params.video_source === "local" && (
-              <div className="space-y-2 rounded-lg border border-border bg-surface-2 p-3">
+              <div className="space-y-2 rounded-lg border bg-muted/40 p-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-muted">{t("Local Materials")}</span>
+                  <span className="text-xs font-medium text-muted-foreground">{t("Local Materials")}</span>
                   <label className="cursor-pointer">
                     <input
                       type="file"
@@ -307,7 +328,7 @@ export function VideoScreen() {
                         if (file) uploadMaterial.mutate(file);
                       }}
                     />
-                    <span className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                    <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
                       <Upload size={12} /> {t("Upload")}
                     </span>
                   </label>
@@ -318,10 +339,9 @@ export function VideoScreen() {
                     const isSelected = selected.includes(file.file);
                     return (
                       <label key={file.file} className="flex cursor-pointer items-center gap-2 text-xs">
-                        <input
-                          type="checkbox"
+                        <Checkbox
                           checked={isSelected}
-                          onChange={() =>
+                          onCheckedChange={() =>
                             set(
                               "video_materials",
                               isSelected ? selected.filter((name) => name !== file.file) : [...selected, file.file],
@@ -329,14 +349,14 @@ export function VideoScreen() {
                           }
                         />
                         <span className="truncate">{file.name}</span>
-                        <span className="ml-auto shrink-0 text-muted">
+                        <span className="ml-auto shrink-0 text-muted-foreground">
                           {(file.size / 1024 / 1024).toFixed(1)} MB
                         </span>
                       </label>
                     );
                   })}
                   {(materials.data?.files ?? []).length === 0 && (
-                    <p className="text-xs text-muted">{t("No local materials uploaded yet")}</p>
+                    <p className="text-xs text-muted-foreground">{t("No local materials uploaded yet")}</p>
                   )}
                 </div>
               </div>
@@ -433,25 +453,14 @@ export function VideoScreen() {
         {/* ---------------------------------------------------------------- */}
         <Card title={t("Audio Settings")}>
           <div className="space-y-3">
-            <Field label={t("TTS Server")}>
-              <Select
-                value={ttsServer}
-                onValueChange={(value) => setTtsServer(value)}
-                options={TTS_SERVERS.map((server) => ({ value: server, label: server }))}
-              />
-            </Field>
-
-            <Field label={t("Speech Synthesis")}>
-              <Select
-                value={String(params.voice_name ?? "")}
-                onValueChange={(value) => set("voice_name", value)}
-                options={[
-                  { value: "no-voice", label: t("No Voice") },
-                  ...(voices.data?.voices ?? []).map((voice) => ({ value: voice, label: voice })),
-                ]}
-                placeholder={voices.isLoading ? t("Loading") : undefined}
-              />
-            </Field>
+            <VoiceSelector
+              ttsServer={ttsServer}
+              voiceName={String(params.voice_name ?? "")}
+              onTtsServerChange={setTtsServer}
+              onVoiceNameChange={setVoiceName}
+              onPreviewVoice={requestSample}
+              includeNoVoice
+            />
 
             <Field label={t("Speech Volume")}>
               <Slider
@@ -479,6 +488,7 @@ export function VideoScreen() {
               voiceRate={Number(params.voice_rate ?? 1)}
               voiceVolume={Number(params.voice_volume ?? 1)}
               script={String(params.video_script ?? "")}
+              autoPlayKey={autoPlayKey}
             />
 
             <Field label={t("Background Music")}>
@@ -513,7 +523,7 @@ export function VideoScreen() {
                       if (file) uploadMusic.mutate(file);
                     }}
                   />
-                  <span className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                  <span className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
                     <Upload size={12} /> {t("Upload")}
                   </span>
                 </label>
@@ -549,7 +559,7 @@ export function VideoScreen() {
               files={musics.data?.files ?? []}
             />
 
-            <hr className="border-border" />
+            <Separator />
 
             <Switch
               checked={Boolean(params.subtitle_enabled)}
@@ -704,7 +714,7 @@ export function VideoScreen() {
                 <div key={video} className="space-y-2">
                   {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
                   <video src={video} controls className="max-h-[70vh] w-full rounded-lg bg-black" />
-                  <a href={video} download className="inline-block text-xs text-accent hover:underline">
+                  <a href={video} download className="inline-block text-xs text-primary hover:underline">
                     {t("Download")}
                   </a>
                 </div>

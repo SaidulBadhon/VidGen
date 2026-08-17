@@ -11,8 +11,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Loader2 } from "lucide-react";
-import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams } from "react-router-dom";
 import { useI18n } from "../i18n/index.tsx";
+import {
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from "../components/ui/breadcrumb";
 import { Alert, Badge, Button, Progress, TabContent, TabTrigger, Tabs, TabsList } from "../components/ui.tsx";
 import { ImportPanel } from "./ImportPanel.tsx";
 import { ReviewPanel } from "./ReviewPanel.tsx";
@@ -158,6 +166,20 @@ export function BookScreen() {
 
   return (
     <div className="space-y-5">
+      <Breadcrumb>
+        <BreadcrumbList>
+          <BreadcrumbItem>
+            <BreadcrumbLink asChild>
+              <Link to="/books">{t("Book Library")}</Link>
+            </BreadcrumbLink>
+          </BreadcrumbItem>
+          <BreadcrumbSeparator />
+          <BreadcrumbItem>
+            <BreadcrumbPage>{detail?.book.title ?? t("Book Untitled")}</BreadcrumbPage>
+          </BreadcrumbItem>
+        </BreadcrumbList>
+      </Breadcrumb>
+
       <div>
         <Button size="sm" variant="ghost" className="-ml-2 mb-3" onClick={() => navigate("/books")}>
           <ArrowLeft size={14} /> {t("Book Back To Library")}

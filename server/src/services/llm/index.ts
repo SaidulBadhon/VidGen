@@ -15,7 +15,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { z } from "zod";
 
-import { appConfig } from "../../config/settings.ts";
+import { appConfig, resolveContentLanguage } from "../../config/settings.ts";
 import {
   DEFAULT_LLM_PROVIDER_ID,
   getLlmProvider,
@@ -247,9 +247,10 @@ export async function generateScript(options: {
     "custom_system_prompt",
   );
 
+  const language = resolveContentLanguage(options.language);
   const prompt = buildScriptPrompt({
     videoSubject: options.videoSubject,
-    language: options.language,
+    language,
     paragraphNumber,
     videoScriptPrompt,
     customSystemPrompt,
@@ -372,7 +373,8 @@ export async function generateSocialMetadata(options: {
 }): Promise<SocialMetadata> {
   const platform = resolveSocialPlatform(options.platform ?? DEFAULT_SOCIAL_PLATFORM);
   const spec = SOCIAL_PLATFORMS[platform]!;
-  const prompt = buildSocialMetadataPrompt({ ...options, platform });
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildSocialMetadataPrompt({ ...options, language, platform });
 
   try {
     const { model, apiKey } = await resolveProvider();
@@ -497,7 +499,8 @@ export async function generateSegmentBoundaries(options: {
 }): Promise<ProposedBoundaries> {
   if (options.units.length === 0) return { sections: [], skipBlockIds: [] };
 
-  const prompt = buildSegmentBoundariesPrompt(options);
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildSegmentBoundariesPrompt({ ...options, language });
   logger.info(
     `detecting book sections: title=${options.bookTitle}, units=${options.units.length}` +
       (options.chunkCount && options.chunkCount > 1

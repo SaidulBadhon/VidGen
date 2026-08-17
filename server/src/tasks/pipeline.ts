@@ -5,7 +5,7 @@
 
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import { appConfig } from "../config/settings.ts";
+import { appConfig, resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
 import {
   CROSS_POST_STATE_FAILED,
   CROSS_POST_STATE_PENDING,
@@ -223,7 +223,7 @@ async function executePipeline(
     try {
       videoScript = await llm.generateScript({
         videoSubject: params.video_subject,
-        language: params.video_language,
+        language: resolveContentLanguage(params.video_language),
         paragraphNumber: params.paragraph_number,
         videoScriptPrompt: params.video_script_prompt,
         customSystemPrompt: params.custom_system_prompt,
@@ -300,7 +300,7 @@ async function executePipeline(
     audioFile = join(taskDir(taskId), "audio.mp3");
     const result = await voice.tts({
       text: videoScript,
-      voiceName: voice.parseVoiceName(params.voice_name),
+      voiceName: voice.parseVoiceName(resolveVoiceName(params.voice_name)),
       voiceRate: params.voice_rate,
       voiceFile: audioFile,
       voiceVolume: params.voice_volume,
@@ -447,7 +447,7 @@ async function executePipeline(
       videoPaths: finalVideoPaths,
       videoSubject: params.video_subject || "",
       videoScript,
-      videoLanguage: params.video_language || "",
+      videoLanguage: resolveContentLanguage(params.video_language),
       platforms,
       youtubePrivacyStatus: uploadPost.getYoutubePrivacyStatus(),
     });

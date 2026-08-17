@@ -82,6 +82,20 @@ export const MAX_WORDS_PER_MINUTE = 400;
 export const ACCEPTED_BOOK_EXTENSIONS = ".epub,.pdf,.txt,.md,.markdown,.text";
 export const ACCEPTED_COVER_EXTENSIONS = ".png,.jpg,.jpeg,.webp";
 
+/** Row-major 3×3 grid: corners, edges, and centre. Matches the server enum. */
+export const COVER_TITLE_POSITIONS = [
+  "top_left",
+  "top",
+  "top_right",
+  "left",
+  "center",
+  "right",
+  "bottom_left",
+  "bottom",
+  "bottom_right",
+] as const;
+export type CoverTitlePosition = (typeof COVER_TITLE_POSITIONS)[number];
+
 export interface SegmentOptions {
   mode: SegmentMode;
   target_duration_seconds: number;
@@ -99,6 +113,13 @@ export interface BookRenderParams {
   bgm_type?: BookBgmType;
   bgm_file?: string;
   bgm_volume?: number;
+  /** Absent on books last rendered before cover titles could be burned in. */
+  burn_book_title?: boolean;
+  burn_chapter_title?: boolean;
+  cover_book_title_position?: CoverTitlePosition;
+  cover_chapter_title_position?: CoverTitlePosition;
+  /** Single pad from before the titles could move independently. */
+  cover_title_position?: CoverTitlePosition;
   font_name: string;
   font_size: number;
   text_fore_color: string;
@@ -124,6 +145,10 @@ export interface BookRenderRequest {
   font_name?: string;
   font_size?: number;
   n_threads?: number;
+  burn_book_title?: boolean;
+  burn_chapter_title?: boolean;
+  cover_book_title_position?: CoverTitlePosition;
+  cover_chapter_title_position?: CoverTitlePosition;
   segment_indexes?: number[];
 }
 

@@ -14,7 +14,6 @@
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, join } from "node:path";
-import { createCanvas } from "@napi-rs/canvas";
 
 import {
   applyBlockEdits,
@@ -33,7 +32,16 @@ import type { BookDocument, BookRenderParamsDocument } from "../db/types.ts";
 import { TASK_STATE_COMPLETE, TASK_STATE_FAILED, TASK_STATE_PROCESSING } from "../models/const.ts";
 import { aspectToResolution, type VideoAspectValue } from "../models/schema.ts";
 import { videoParamsForBookRender } from "../models/bookSchema.ts";
+import { resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
 import { getBgmFile, shouldUseBgm } from "../services/bgm.ts";
+import {
+  coverOverlayCacheName,
+  coverOverlayCopy,
+  coverTitlePositionsFromParams,
+  renderCoverStill,
+  renderDefaultCover,
+  wantsCoverTitleBurn,
+} from "../services/book/coverOverlay.ts";
 import { keptBlocks } from "../services/book/filter/decisions.ts";
 import { announcementLines, planBookSegments } from "../services/book/smartSegment.ts";
 import type { Block, BookStructure, FilterDecision, SegmentOptions } from "../services/book/types.ts";
@@ -42,7 +50,6 @@ import { writeSrtFile } from "../services/subtitle/srt.ts";
 import { supportsAssBurn } from "../services/video/capabilities.ts";
 import { muxSoftSubtitles, sidecarSubtitlePath } from "../services/video/softSubs.ts";
 import { renderStillSegment } from "../services/video/still.ts";
-import { registerSubtitleFont, resolveSubtitleFontPath } from "../services/video/textRender.ts";
 import { synthesizeLongform } from "../services/voice/longform.ts";
 import { errorMessage, logger } from "../utils/logger.ts";
 import { getUuid } from "../utils/misc.ts";
@@ -225,92 +232,14 @@ export function segmentNarrationText(blocks: readonly Block[], leadIn: readonly 
 // Cover image
 // ---------------------------------------------------------------------------
 
-const COVER_BACKGROUND = "#14161c";
-const COVER_TITLE_COLOR = "#f5f5f7";
-const COVER_AUTHOR_COLOR = "#9aa0ad";
-
-function wrapCoverLines(
-  measure: (text: string) => number,
-  text: string,
-  maxWidth: number,
-  maxLines: number,
-): string[] {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [];
-
-  const lines: string[] = [];
-  let current = "";
-
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (current && measure(candidate) > maxWidth) {
-      lines.push(current);
-      if (lines.length === maxLines) return lines;
-      current = word;
-    } else {
-      current = candidate;
-    }
-  }
-
-  if (current && lines.length < maxLines) lines.push(current);
-  return lines;
-}
-
 /**
- * Draws a plain title card.
+ * The still a segment holds when nothing is burned onto it.
  *
  * `renderStillSegment` needs a picture and most uploads carry no usable cover,
  * so one is generated rather than failing the render or shipping a blank frame.
  * It is cached per resolution because re-rendering it for every segment of a
  * 300-segment book would be pure waste.
  */
-function renderDefaultCover(
-  title: string,
-  author: string,
-  width: number,
-  height: number,
-  fontFile: string,
-): Buffer {
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-  // A Bangla or Chinese title under a font that lacks the script would draw a
-  // cover of empty boxes, so the same substitution the subtitles get applies.
-  const family = registerSubtitleFont(resolveSubtitleFontPath(fontFile, `${title} ${author}`));
-
-  ctx.fillStyle = COVER_BACKGROUND;
-  ctx.fillRect(0, 0, width, height);
-
-  const titleSize = Math.round(Math.min(width, height) * 0.085);
-  const authorSize = Math.round(titleSize * 0.5);
-  const maxWidth = width * 0.8;
-
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-
-  ctx.font = `${titleSize}px "${family}"`;
-  const titleLines = wrapCoverLines((text) => ctx.measureText(text).width, title || "Untitled", maxWidth, 4);
-
-  const lineHeight = titleSize * 1.3;
-  const authorLine = author.trim();
-  const blockHeight = titleLines.length * lineHeight + (authorLine ? authorSize * 3 : 0);
-  let y = height / 2 - blockHeight / 2 + lineHeight / 2;
-
-  ctx.fillStyle = COVER_TITLE_COLOR;
-  for (const line of titleLines) {
-    ctx.fillText(line, width / 2, y);
-    y += lineHeight;
-  }
-
-  if (authorLine) {
-    ctx.font = `${authorSize}px "${family}"`;
-    ctx.fillStyle = COVER_AUTHOR_COLOR;
-    const [firstAuthorLine] = wrapCoverLines((text) => ctx.measureText(text).width, authorLine, maxWidth, 1);
-    if (firstAuthorLine) ctx.fillText(firstAuthorLine, width / 2, y + authorSize);
-  }
-
-  return canvas.toBuffer("image/png");
-}
-
 async function ensureCoverImage(
   book: BookDocument,
   width: number,
@@ -324,6 +253,69 @@ async function ensureCoverImage(
     await Bun.write(generated, renderDefaultCover(book.title, book.author, width, height, fontFile));
   }
   return generated;
+}
+
+/**
+ * The still for one segment, with book/chapter titles burned on when asked.
+ *
+ * Overlays are per chapter (and per resolution) rather than per book: chapter
+ * 12 is a different picture from chapter 1, and stretching a 16:9 overlay into
+ * a 9:16 frame would squash the lettering. A retry with the same titles reuses
+ * the file so a 300-segment book does not rasterise the same chapter twice.
+ */
+async function ensureSegmentCoverImage(
+  book: BookDocument,
+  segmentTitle: string,
+  width: number,
+  height: number,
+  fontFile: string,
+  params: BookRenderParamsDocument,
+): Promise<string> {
+  const uploaded = book.cover_path && existsSync(book.cover_path) ? book.cover_path : null;
+  if (!wantsCoverTitleBurn(params)) {
+    return uploaded ?? (await ensureCoverImage(book, width, height, fontFile));
+  }
+
+  const copy = coverOverlayCopy({
+    bookTitle: book.title,
+    chapterTitle: segmentTitle,
+    burnBookTitle: params.burn_book_title === true,
+    burnChapterTitle: params.burn_chapter_title === true,
+  });
+  if (!copy.bookTitle && !copy.chapterTitle) {
+    return uploaded ?? (await ensureCoverImage(book, width, height, fontFile));
+  }
+
+  const overlayDir = booksDir(join(book._id, "cover-overlays"));
+  const positions = coverTitlePositionsFromParams(params);
+  const filename = coverOverlayCacheName({
+    width,
+    height,
+    bookTitle: copy.bookTitle,
+    chapterTitle: copy.chapterTitle,
+    burnBookTitle: Boolean(copy.bookTitle),
+    burnChapterTitle: Boolean(copy.chapterTitle),
+    sourceKind: uploaded ? "upload" : "blank",
+    bookPosition: positions.book,
+    chapterPosition: positions.chapter,
+  });
+  const overlayPath = join(overlayDir, filename);
+  if (existsSync(overlayPath)) return overlayPath;
+
+  const png = await renderCoverStill({
+    sourcePath: uploaded,
+    bookTitle: copy.bookTitle,
+    chapterTitle: copy.chapterTitle,
+    width,
+    height,
+    fontFile,
+    burnBookTitle: Boolean(copy.bookTitle),
+    burnChapterTitle: Boolean(copy.chapterTitle),
+    bookPosition: positions.book,
+    chapterPosition: positions.chapter,
+  });
+  await Bun.write(overlayPath, png);
+  return overlayPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +405,7 @@ export async function runSegmentRender(
 
     const narration = await synthesizeLongform({
       text,
-      voiceName: params.voice_name,
+      voiceName: resolveVoiceName(params.voice_name),
       voiceRate: params.voice_rate,
       voiceVolume: params.voice_volume,
       outputFile: audioFile,
@@ -441,7 +433,10 @@ export async function runSegmentRender(
 
     const [width, height] = aspectToResolution(params.video_aspect as VideoAspectValue);
     const fontFile = join(fontDir(), params.font_name);
-    const coverPath = await ensureCoverImage(book, width, height, fontFile);
+    const coverPath = await ensureSegmentCoverImage(book, segment.title, width, height, fontFile, params);
+    if (wantsCoverTitleBurn(params)) {
+      await appendTaskLog(taskId, "burning titles onto the cover still");
+    }
 
     // Burning is a preference, not a guarantee: a Homebrew ffmpeg routinely
     // ships without libass, and asking it to burn fails the whole encode. The
@@ -501,7 +496,7 @@ export async function runSegmentRender(
         videoPath: renderTarget,
         subtitlePath: subtitleFile,
         outputFile: videoFile,
-        language: structure.language,
+        language: resolveContentLanguage(structure.language),
         title: segment.title,
         sidecarPath: sidecarSubtitlePath(videoFile),
         signal,

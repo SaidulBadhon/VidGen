@@ -238,6 +238,10 @@ describe("bookRenderRequestSchema", () => {
     expect(parsed.video_aspect).toBe("16:9");
     expect(parsed.font_name).toBe("MicrosoftYaHeiBold.ttc");
     expect(parsed.n_threads).toBe(2);
+    expect(parsed.burn_book_title).toBe(false);
+    expect(parsed.burn_chapter_title).toBe(false);
+    expect(parsed.cover_book_title_position).toBe("bottom");
+    expect(parsed.cover_chapter_title_position).toBe("bottom");
   });
 
   test("rejects an unsupported subtitle mode or aspect", () => {
@@ -296,6 +300,35 @@ describe("bookRenderRequestSchema", () => {
     expect(params.bgm_file).toBe("calm.mp3");
     expect(params.bgm_volume).toBe(0.15);
     expect(shouldUseBgm(params.bgm_type, params.bgm_volume)).toBe(true);
+  });
+
+  test("carries cover title burn choices through to the stored render params", () => {
+    const params = renderParamsToDocument(
+      bookRenderRequestSchema.parse({
+        voice_name: "v",
+        burn_book_title: true,
+        burn_chapter_title: true,
+      }),
+    );
+    expect(params.burn_book_title).toBe(true);
+    expect(params.burn_chapter_title).toBe(true);
+  });
+
+  test("stores cover title positions independently and rejects one that is not on the grid", () => {
+    const params = renderParamsToDocument(
+      bookRenderRequestSchema.parse({
+        voice_name: "v",
+        burn_book_title: true,
+        burn_chapter_title: true,
+        cover_book_title_position: "top_left",
+        cover_chapter_title_position: "bottom_right",
+      }),
+    );
+    expect(params.cover_book_title_position).toBe("top_left");
+    expect(params.cover_chapter_title_position).toBe("bottom_right");
+    expect(() =>
+      bookRenderRequestSchema.parse({ voice_name: "v", cover_book_title_position: "north" }),
+    ).toThrow();
   });
 
   test("rejects the AI providers, which cannot score a chapter-length segment", () => {

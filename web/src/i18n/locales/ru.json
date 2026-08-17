@@ -222,6 +222,7 @@
     "Hide Basic Settings": "Скрыть основные настройки\n\nПанель основных настроек не будет показана на странице.\n\nЧтобы вернуть ее, установите `hide_config = false` в `config.toml`",
     "LLM Settings": "**Настройки LLM**",
     "LLM Settings Tab": "Настройки LLM",
+    "Narration Settings Tab": "Озвучка",
     "Material API Tab": "API материалов",
     "Interface Settings Tab": "Настройки интерфейса",
     "Cache Management Tab": "Управление кэшем",

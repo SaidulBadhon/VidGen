@@ -170,6 +170,16 @@ export interface BookRenderParamsDocument {
   bgm_type?: string;
   bgm_file?: string;
   bgm_volume?: number;
+  /**
+   * Titles burned onto the cover still. Absent on books rendered before the
+   * overlay existed, which must keep using the plain cover.
+   */
+  burn_book_title?: boolean;
+  burn_chapter_title?: boolean;
+  cover_book_title_position?: string;
+  cover_chapter_title_position?: string;
+  /** Single pad from before the titles could move independently. */
+  cover_title_position?: string;
 }
 
 /**

@@ -226,6 +226,7 @@
     "Hide Basic Settings": "Ocultar Configurações Básicas\n\nOculto, o painel de configurações básicas não será exibido na página.\n\nSe precisar exibi-lo novamente, defina `hide_config = false` em `config.toml`",
     "LLM Settings": "**Configurações do LLM**",
     "LLM Settings Tab": "Configurações do LLM",
+    "Narration Settings Tab": "Narração",
     "Material API Tab": "APIs de materiais",
     "Interface Settings Tab": "Configurações da interface",
     "Cache Management Tab": "Gerenciamento de cache",

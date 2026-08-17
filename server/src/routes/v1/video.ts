@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { rm } from "node:fs/promises";
 import { relative, join } from "node:path";
-import { appConfig } from "../../config/settings.ts";
+import { appConfig, resolveVoiceName } from "../../config/settings.ts";
 import { badRequest, conflict, notFound, tooManyRequests } from "../../http/errors.ts";
 import { serveTaskFile } from "../../http/staticFiles.ts";
 import {
@@ -74,11 +74,12 @@ function withMediaUris(task: TaskDocument): Record<string, unknown> {
 /** Accepts a task and hands it to the queue. */
 async function createGenerationTask(params: VideoParams, stopAt: StopAt, requestId: string) {
   const taskId = getUuid();
+  const resolved: VideoParams = { ...params, voice_name: resolveVoiceName(params.voice_name) };
 
-  await createTask(taskId, { params, stop_at: stopAt, request_id: requestId, progress: 0 });
+  await createTask(taskId, { params: resolved, stop_at: stopAt, request_id: requestId, progress: 0 });
 
   try {
-    taskQueue.add(taskId, (signal) => runPipeline({ taskId, params, stopAt, signal }));
+    taskQueue.add(taskId, (signal) => runPipeline({ taskId, params: resolved, stopAt, signal }));
   } catch (error) {
     await deleteTask(taskId);
     if (error instanceof TaskQueueFullError) {

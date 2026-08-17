@@ -129,6 +129,9 @@ export function SegmentsPanel({
   const totalDuration = segments.reduce((sum, segment) => sum + (segment.estimated_duration || 0), 0);
   const problem = options ? validate(options) : "invalid";
   const dirty = Boolean(options) && JSON.stringify(options) !== serverKey;
+  // Smart detection is not deterministic: the same options should still be
+  // runnable so a reviewer can try again after the model or the detector changes.
+  const canApply = Boolean(options) && !problem && (dirty || options?.mode === "smart");
   const canRetry = Boolean(detail?.book.render_params);
 
   const set = <K extends keyof SegmentOptions>(key: K, value: SegmentOptions[K]) => {
@@ -213,7 +216,7 @@ export function SegmentsPanel({
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 variant="primary"
-                disabled={!dirty || Boolean(problem) || apply.isPending || renderingActive}
+                disabled={!canApply || apply.isPending || renderingActive}
                 onClick={() => options && apply.mutate(options)}
               >
                 {apply.isPending ? (

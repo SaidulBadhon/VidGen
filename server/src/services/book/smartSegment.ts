@@ -69,7 +69,9 @@ export type SectionProposer = (input: {
 const CHAPTER_LIKE =
   /^(book|part|act|scene|chapter|canto|volume|prologue|epilogue|preface|introduction|foreword|afterword|appendix|acknowledgements?)\b/i;
 const ROMAN_TITLE = /^[IVXLCDM]{1,8}([.)]|$)(\s+\S|$)/;
-const NUMBERED_TITLE = /^(chapter\s+)?\d{1,3}([.)])(\s+\S|$)/i;
+/** Punctuated "1. The Period", or a heading that is only the number "1". */
+const NUMBERED_TITLE = /^(chapter\s+)?\d{1,3}(([.)])(\s+\S|$)|$)/i;
+const BARE_CHAPTER_NUMBER = /^(?:chapter\s+)?(\d{1,3}|[IVXLCDM]{1,8})\.?$/i;
 const BOOK_PART = /^book\s+(the\s+)?([a-z]+|[IVXLCDM]+|\d+)\b/i;
 const TOC_HEADING =
   /^(table\s+of\s+contents|contents(?:\s+page)?|list\s+of\s+(?:chapters|contents)|toc)\.?$/i;
@@ -110,6 +112,37 @@ export function looksLikeTocHeading(text: string): boolean {
 
 function normalizeTitleKey(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Spoken label for a heading that is only a chapter number: "1" → "Chapter 1".
+ * Returns null when the title already has a name ("I. The Period").
+ */
+export function numberedChapterLabel(title: string): string | null {
+  const trimmed = title.replace(/\s+/g, " ").trim();
+  const match = trimmed.match(BARE_CHAPTER_NUMBER);
+  if (!match) return null;
+  return `Chapter ${match[1]}`;
+}
+
+/**
+ * Turns a bare "1" into "Chapter 1", and a number plus the next heading into
+ * "Chapter 8 — Camilla" so POV/year lines are not used instead of the number.
+ */
+export function formatSectionTitle(title: string, nextHeading?: string): string {
+  const primary = title.replace(/\s+/g, " ").trim();
+  const following = (nextHeading ?? "").replace(/\s+/g, " ").trim();
+  const numbered = numberedChapterLabel(primary);
+  const head = numbered ?? primary;
+  if (
+    following &&
+    numbered &&
+    !numberedChapterLabel(following) &&
+    !normalizeTitleKey(head).includes(normalizeTitleKey(following))
+  ) {
+    return `${head}${TITLE_SEPARATOR}${following}`;
+  }
+  return head || following;
 }
 
 function previewOf(text: string): string {
@@ -191,6 +224,7 @@ export function heuristicSections(units: OutlineUnit[]): SmartSection[] {
   const seen = new Set<string>();
   for (const unit of units) {
     if (unit.kind === "prose") continue;
+    if (unit.kind === "marker" && !looksLikeSectionTitle(unit.title)) continue;
     if (seen.has(unit.startBlockId)) continue;
     seen.add(unit.startBlockId);
     sections.push({ startBlockId: unit.startBlockId, title: unit.title });
@@ -398,6 +432,61 @@ function asProposal(result: SmartSection[] | SectionProposal): SectionProposal {
   return { sections: result.sections, skipBlockIds: result.skipBlockIds ?? [] };
 }
 
+function isProtectedSectionStart(units: OutlineUnit[], id: string): boolean {
+  const unit = units.find((entry) => entry.startBlockId === id);
+  if (!unit || unit.kind === "prose") return false;
+  return looksLikeSectionTitle(unit.title) || Boolean(numberedChapterLabel(unit.title));
+}
+
+/**
+ * LLM skip lists are often wrong about numbered headings (they look like page
+ * numbers). Contents listings still come from the heuristic skip set.
+ */
+function honoredSkipIds(units: OutlineUnit[], heuristicSkip: string[], proposedSkip: string[]): string[] {
+  const skip = new Set(heuristicSkip);
+  for (const id of proposedSkip) {
+    if (skip.has(id)) continue;
+    if (isProtectedSectionStart(units, id)) continue;
+    skip.add(id);
+  }
+  return [...skip];
+}
+
+function mergeSectionStarts(heuristic: SmartSection[], proposed: SmartSection[]): SmartSection[] {
+  const byId = new Map<string, SmartSection>();
+  for (const section of heuristic) {
+    byId.set(section.startBlockId, {
+      startBlockId: section.startBlockId,
+      title: formatSectionTitle(section.title),
+    });
+  }
+  for (const section of proposed) {
+    const id = section.startBlockId.trim();
+    if (!id) continue;
+    const title = formatSectionTitle(section.title);
+    const existing = byId.get(id);
+    if (!existing) {
+      byId.set(id, { startBlockId: id, title });
+      continue;
+    }
+    byId.set(id, {
+      startBlockId: id,
+      title: preferSectionTitle(existing.title, title),
+    });
+  }
+  return [...byId.values()];
+}
+
+function preferSectionTitle(heuristic: string, proposed: string): string {
+  if (!proposed) return heuristic;
+  if (!heuristic) return proposed;
+  const heuristicNumber = numberedChapterLabel(heuristic);
+  const proposedNumber = numberedChapterLabel(proposed);
+  if (heuristicNumber && !proposedNumber) return formatSectionTitle(heuristic, proposed);
+  if (proposed.length >= heuristic.length) return proposed;
+  return heuristic;
+}
+
 function blockIndexById(kept: Block[]): Map<string, number> {
   const index = new Map<string, number>();
   kept.forEach((block, i) => index.set(block.id, i));
@@ -479,10 +568,11 @@ async function defaultProposer(input: {
 /**
  * Resolves section starts for smart mode.
  *
- * The LLM is asked first; if it returns nothing usable (offline model, empty
- * JSON, ids that do not exist) the heading/marker heuristic is used instead,
- * which is already enough to recover "Chapter I" lines a PDF treated as prose.
- * Contents listings are skipped in either path so they cannot become videos.
+ * The LLM is asked first and merged with heading/marker starts so a model that
+ * only marks "Chapter 2" and "Chapter 8" cannot swallow 3–7 as "2 (part 12)".
+ * If it returns nothing usable (offline model, empty JSON, ids that do not
+ * exist) the heading/marker heuristic is used alone. Contents listings are
+ * skipped in either path so they cannot become videos.
  */
 export async function detectSmartSections(
   structure: BookStructure,
@@ -497,12 +587,11 @@ export async function detectSmartSections(
     (section) => !heuristicSkip.includes(section.startBlockId),
   );
   const fallback = normalizeSections(ordered, fallbackSections);
-  const totalSeconds = units.reduce((sum, unit) => sum + unit.seconds, 0);
 
   try {
     const chunks = chunkUnits(units);
     const proposed: SmartSection[] = [];
-    const skipBlockIds = [...heuristicSkip];
+    const proposedSkip: string[] = [];
     for (const [index, chunk] of chunks.entries()) {
       const part = asProposal(
         await propose({
@@ -515,15 +604,20 @@ export async function detectSmartSections(
         }),
       );
       proposed.push(...part.sections);
-      skipBlockIds.push(...(part.skipBlockIds ?? []));
+      proposedSkip.push(...(part.skipBlockIds ?? []));
     }
 
-    const skip = new Set(skipBlockIds);
-    const usable = proposed.filter((section) => !skip.has(section.startBlockId));
-    const normalized = normalizeSections(ordered, usable);
-    if (usable.length > 0 && (normalized.length >= 2 || totalSeconds <= options.maxDurationSeconds)) {
-      logger.info(`smart segments: using ${normalized.length} LLM section starts, skipping ${skip.size} unread ids`);
-      return { sections: normalized, skipBlockIds: [...skip] };
+    const skip = honoredSkipIds(units, heuristicSkip, proposedSkip);
+    const skipSet = new Set(skip);
+    const merged = mergeSectionStarts(fallbackSections, proposed).filter(
+      (section) => !skipSet.has(section.startBlockId),
+    );
+    const normalized = normalizeSections(ordered, merged);
+    if (normalized.length > 0) {
+      logger.info(
+        `smart segments: using ${normalized.length} section starts (${proposed.length} from LLM, ${fallbackSections.length} heuristic), skipping ${skip.length} unread ids`,
+      );
+      return { sections: normalized, skipBlockIds: skip };
     }
     logger.warning(
       `smart segments: LLM returned ${proposed.length} starts (${normalized.length} usable); falling back to ${fallback.length} heuristic starts`,
@@ -551,17 +645,45 @@ function titleForRun(
 ): { title: string; explicit: boolean } {
   const first = blocks[0];
   if (!first) return { title: "Segment", explicit: false };
+
   const namedTitle = (named.get(first.id) ?? "").trim();
-  if (namedTitle) return { title: namedTitle, explicit: true };
-  if (first.kind === "heading" && first.text.trim()) {
-    return { title: first.text.trim(), explicit: true };
+  const firstHeading = first.kind === "heading" ? first.text.trim() : "";
+  const primary = namedTitle || firstHeading;
+  const nextHeading =
+    blocks[1]?.kind === "heading" && blocks[1].text.trim() && !numberedChapterLabel(blocks[1].text)
+      ? blocks[1].text.trim()
+      : undefined;
+
+  if (primary) {
+    return { title: formatSectionTitle(primary, nextHeading), explicit: true };
   }
+
   const heading = blocks.find((block) => block.kind === "heading" && block.text.trim());
-  if (heading) return { title: heading.text.trim(), explicit: true };
+  if (heading) {
+    return { title: formatSectionTitle(heading.text.trim()), explicit: true };
+  }
   return {
-    title: chapterTitleOf(structure, first.chapterId) || structure.title.trim() || "Segment",
+    title: formatSectionTitle(
+      chapterTitleOf(structure, first.chapterId) || structure.title.trim() || "Segment",
+    ),
     explicit: false,
   };
+}
+
+function durationSplitTitle(
+  runTitle: string,
+  labeled: { title: string; explicit: boolean },
+  partIndex: number,
+): string {
+  if (partIndex === 0) return runTitle;
+  if (labeled.explicit) {
+    const runKey = normalizeTitleKey(runTitle);
+    const partKey = normalizeTitleKey(labeled.title);
+    if (partKey && partKey !== runKey && !partKey.startsWith(`${runKey} `) && !runKey.startsWith(`${partKey} `)) {
+      return labeled.title;
+    }
+  }
+  return `${runTitle} (part ${partIndex + 1})`;
 }
 
 function splitIntoRuns(
@@ -642,12 +764,15 @@ function toPlan(
 function preferredRun(open: SectionRun[], structure: BookStructure): SectionRun {
   const book = normalizeTitleKey(speakableBookTitle(structure.title));
   const author = normalizeTitleKey(speakablePersonName(structure.author));
+  const looksNamed = (title: string): boolean =>
+    Boolean(looksLikeSectionTitle(title) || numberedChapterLabel(title));
   const chapter = open.find((run) => {
     if (!run.explicit) return false;
     const key = normalizeTitleKey(run.title);
     if (!key) return false;
     if (book && key === book) return false;
     if (author && key === author) return false;
+    if (!looksNamed(run.title)) return false;
     return true;
   });
   return chapter ?? open.find((run) => run.explicit) ?? open[0]!;
@@ -695,6 +820,8 @@ export function planSmartSegments(
     openSeconds = 0;
   };
 
+  const named = new Map(normalizeSections(ordered, sections).map((section) => [section.startBlockId, section.title]));
+
   const emitDurationSplit = (run: SectionRun): void => {
     const inner = planSegments(structure, run.blocks, { ...options, mode: "duration" });
     if (inner.length <= 1) {
@@ -702,10 +829,11 @@ export function planSmartSegments(
       return;
     }
     inner.forEach((part, partIndex) => {
-      const title = partIndex === 0 ? run.title : `${run.title} (part ${partIndex + 1})`;
       const blocks = part.blockIds
         .map((id) => run.blocks.find((block) => block.id === id))
         .filter((block): block is Block => Boolean(block));
+      const labeled = titleForRun(blocks, structure, named);
+      const title = durationSplitTitle(run.title, labeled, partIndex);
       segments.push(toPlan(blocks, structure, title, segments.length, options.wordsPerMinute));
     });
   };

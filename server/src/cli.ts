@@ -13,7 +13,7 @@ import "./config/dotenv.ts";
 
 import { parseArgs } from "node:util";
 import { connect, disconnect } from "./db/client.ts";
-import { initSettings } from "./config/settings.ts";
+import { initSettings, resolveVoiceName } from "./config/settings.ts";
 import { STOP_AT_STAGES, TASK_STATE_FAILED, type StopAt } from "./models/const.ts";
 import { videoParamsSchema } from "./models/schema.ts";
 import { runPipeline } from "./tasks/pipeline.ts";
@@ -182,7 +182,7 @@ async function main(): Promise<number> {
       : undefined;
   const backgroundColor = values["subtitle-background-color"] as string | undefined;
 
-  const params = videoParamsSchema.parse({
+  const parsed = videoParamsSchema.parse({
     video_subject: subject ?? "",
     video_script: script ?? "",
     ...(values["video-terms"] ? { video_terms: values["video-terms"] } : {}),
@@ -244,6 +244,7 @@ async function main(): Promise<number> {
   await connect();
   await initSettings();
 
+  const params = { ...parsed, voice_name: resolveVoiceName(parsed.voice_name) };
   const taskId = (values["task-id"] as string | undefined) ?? getUuid();
   await createTask(taskId, { params, stop_at: stopAt as StopAt });
 

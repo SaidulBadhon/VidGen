@@ -9,7 +9,12 @@
 
 import { z } from "zod";
 import { videoParamsSchema, type VideoParams } from "./schema.ts";
-import { DEFAULT_SEGMENT_OPTIONS, type SegmentOptions } from "../services/book/types.ts";
+import {
+  COVER_TITLE_POSITIONS,
+  DEFAULT_COVER_TITLE_POSITION,
+  DEFAULT_SEGMENT_OPTIONS,
+  type SegmentOptions,
+} from "../services/book/types.ts";
 import type { BookRenderParamsDocument, BookSegmentOptionsDocument } from "../db/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -172,6 +177,13 @@ export const bookRenderRequestSchema = z.object({
 
   n_threads: z.number().int().min(1).max(64).default(2),
 
+  // Off by default so a book re-rendered after this shipped keeps the cover
+  // it already used, instead of quietly gaining titles it never asked for.
+  burn_book_title: z.boolean().default(false),
+  burn_chapter_title: z.boolean().default(false),
+  cover_book_title_position: z.enum(COVER_TITLE_POSITIONS).default(DEFAULT_COVER_TITLE_POSITION),
+  cover_chapter_title_position: z.enum(COVER_TITLE_POSITIONS).default(DEFAULT_COVER_TITLE_POSITION),
+
   /** Restricts the fan-out to specific segments; empty renders the whole book. */
   segment_indexes: z.array(z.number().int().min(0)).nullish(),
 });
@@ -187,6 +199,10 @@ export function renderParamsToDocument(request: BookRenderRequest): BookRenderPa
     bgm_type: request.bgm_type,
     bgm_file: request.bgm_file,
     bgm_volume: request.bgm_volume,
+    burn_book_title: request.burn_book_title,
+    burn_chapter_title: request.burn_chapter_title,
+    cover_book_title_position: request.cover_book_title_position,
+    cover_chapter_title_position: request.cover_chapter_title_position,
     font_name: request.font_name,
     font_size: request.font_size,
     text_fore_color: request.text_fore_color,

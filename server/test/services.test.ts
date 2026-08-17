@@ -3,13 +3,13 @@
  * Cases ported from python-version/test/services/.
  */
 
-import { beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { defaultSettings, settingsSchema } from "../src/config/schema.ts";
-import { __setSettingsForTest } from "../src/config/settings.ts";
+import { DEFAULT_VOICE_NAME, defaultSettings, settingsSchema } from "../src/config/schema.ts";
+import { __setSettingsForTest, resolveContentLanguage, resolveVoiceName } from "../src/config/settings.ts";
 import { decodeLinuxRouteGateway } from "../src/config/runtime.ts";
 import { resolvePathWithinDirectory, sanitizeOutputName, sanitizeUploadFilename, UnsafePathError } from "../src/utils/fileSecurity.ts";
 import { parseByteRange } from "../src/http/staticFiles.ts";
@@ -20,13 +20,19 @@ import { createSubtitleCues, matchScriptLine, formatTextForSubtitles } from "../
 import { buildProportionalCues } from "../src/services/voice/syntheticCues.ts";
 import { convertRateToPercent, generateSecMsGec } from "../src/services/voice/edgeTts.ts";
 import { estimateNoVoiceDuration } from "../src/services/voice/index.ts";
-import { isNoVoice, isAzureV2Voice, parseVoiceName, inferTtsServerFromVoice } from "../src/services/voice/voices.ts";
+import {
+  isNoVoice,
+  isAzureV2Voice,
+  parseVoiceName,
+  inferTtsServerFromVoice,
+  listVoicesForServer,
+} from "../src/services/voice/voices.ts";
 import { detectAudioMime } from "../src/services/voice/preview.ts";
 import { voicePreviewRequestSchema } from "../src/models/schema.ts";
 import { matchesVideoAspect, filterMaterialsByAspect } from "../src/services/material/search.ts";
 import { materialSourceRecord } from "../src/services/material/download.ts";
 import { safePublicUrl } from "../src/services/material/http.ts";
-import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt } from "../src/services/llm/prompts.ts";
+import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt, languageLabel } from "../src/services/llm/prompts.ts";
 import { extractJson, formatScriptResponse, stripCodeFence } from "../src/services/llm/index.ts";
 import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName } from "../src/utils/paths.ts";
 import { isOwnerAlive, parseOwner, PROCESS_OWNER_ID } from "../src/tasks/owner.ts";
@@ -45,6 +51,9 @@ describe("settings schema", () => {
     expect(settings.app.max_concurrent_tasks).toBe(5);
     expect(settings.whisper.provider).toBe("whisper-cpp");
     expect(settings.ui.font_name).toBe("MicrosoftYaHeiBold.ttc");
+    expect(settings.ui.language).toBe("");
+    expect(settings.ui.tts_server).toBe("azure-tts-v1");
+    expect(settings.ui.voice_name).toBe("");
   });
 
   test("backfills fields missing from a stored document", () => {
@@ -384,6 +393,18 @@ describe("voice helpers", () => {
     expect(inferTtsServerFromVoice("en-US-AriaNeural-Female")).toBe("azure-tts-v1");
   });
 
+  test("azure catalogue is limited to Bangla and English", async () => {
+    const v1 = await listVoicesForServer("azure-tts-v1");
+    expect(v1.length).toBeGreaterThan(0);
+    expect(v1.every((voice) => voice.startsWith("bn-") || voice.startsWith("en-"))).toBe(true);
+    expect(v1.some((voice) => voice.startsWith("bn-"))).toBe(true);
+    expect(v1.some((voice) => voice.startsWith("en-"))).toBe(true);
+
+    const v2 = await listVoicesForServer("azure-tts-v2");
+    expect(v2.length).toBeGreaterThan(0);
+    expect(v2.every((voice) => voice.startsWith("bn-") || voice.startsWith("en-"))).toBe(true);
+  });
+
   test("formats the speech rate as a signed percentage", () => {
     // "0%" without a sign is rejected by the service.
     expect(convertRateToPercent(1.0)).toBe("+0%");
@@ -576,6 +597,69 @@ describe("llm helpers", () => {
   test("clamps an out-of-range paragraph count", () => {
     expect(buildScriptPrompt({ videoSubject: "x", paragraphNumber: 99 })).toContain("number of paragraphs: 10");
     expect(buildScriptPrompt({ videoSubject: "x", paragraphNumber: 0 })).toContain("number of paragraphs: 1");
+  });
+
+  test("forces the requested script language", () => {
+    const prompt = buildScriptPrompt({ videoSubject: "Bees", language: "bn" });
+    expect(prompt).toContain("write the entire script in Bengali");
+    expect(prompt).toContain("language: Bengali");
+    expect(prompt).not.toContain("respond in the same language as the video subject");
+  });
+});
+
+describe("resolveContentLanguage", () => {
+  afterEach(() => {
+    __setSettingsForTest(defaultSettings());
+  });
+
+  test("prefers an explicit request over the stored preference", () => {
+    __setSettingsForTest(settingsSchema.parse({ ui: { language: "en" } }));
+    expect(resolveContentLanguage("bn")).toBe("bn");
+  });
+
+  test("falls back to the stored preference", () => {
+    __setSettingsForTest(settingsSchema.parse({ ui: { language: "bn" } }));
+    expect(resolveContentLanguage("")).toBe("bn");
+    expect(resolveContentLanguage("auto")).toBe("bn");
+    expect(resolveContentLanguage(undefined)).toBe("bn");
+  });
+
+  test("returns empty when neither is set", () => {
+    __setSettingsForTest(defaultSettings());
+    expect(resolveContentLanguage("")).toBe("");
+  });
+
+  test("names known language codes for prompts", () => {
+    expect(languageLabel("bn")).toBe("Bengali");
+    expect(languageLabel("en")).toBe("English");
+    expect(languageLabel("unknown")).toBe("unknown");
+  });
+});
+
+describe("resolveVoiceName", () => {
+  afterEach(() => {
+    __setSettingsForTest(defaultSettings());
+  });
+
+  test("prefers an explicit request over the stored preference", () => {
+    __setSettingsForTest(settingsSchema.parse({ ui: { voice_name: "en-US-JennyNeural-Female" } }));
+    expect(resolveVoiceName("kokoro:af_heart-Female")).toBe("kokoro:af_heart-Female");
+  });
+
+  test("keeps the explicit no-voice sentinel", () => {
+    __setSettingsForTest(settingsSchema.parse({ ui: { voice_name: "en-US-JennyNeural-Female" } }));
+    expect(resolveVoiceName("no-voice")).toBe("no-voice");
+  });
+
+  test("falls back to the stored preference", () => {
+    __setSettingsForTest(settingsSchema.parse({ ui: { voice_name: "en-US-JennyNeural-Female" } }));
+    expect(resolveVoiceName("")).toBe("en-US-JennyNeural-Female");
+    expect(resolveVoiceName(undefined)).toBe("en-US-JennyNeural-Female");
+  });
+
+  test("falls back to the bundled default when nothing is stored", () => {
+    __setSettingsForTest(defaultSettings());
+    expect(resolveVoiceName("")).toBe(DEFAULT_VOICE_NAME);
   });
 });
 
