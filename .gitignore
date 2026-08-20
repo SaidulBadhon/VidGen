@@ -12,8 +12,6 @@ logs/
 node_modules
 dist
 .vite
-bun.lock
-bun.lockb
 *.tsbuildinfo
 
 # Env
