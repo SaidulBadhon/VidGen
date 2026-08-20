@@ -260,6 +260,18 @@ export const bookRenderRequestSchema = z.object({
   // form invent a colour; there is no neutral hex that means "no opinion".
   template_accent: z.string().default(""),
 
+  // Off by default for the same reason `burn_book_title` is: a book rendered
+  // before footage shipped and re-rendered after must be handed an identical
+  // ffmpeg argument list. Narration that quietly grew moving pictures under it
+  // is a different video from the one the reviewer approved.
+  footage_enabled: z.boolean().default(false),
+  // The provider list is the short-video product's own, taken from its schema
+  // rather than restated, so a fifth provider added there cannot go missing
+  // here. The default is stripped because unset must not mean "pexels": it
+  // defers to the app-level `video_source` setting, so an operator who switches
+  // provider — a lapsed API key, a quota — does not have to re-save every book.
+  footage_source: videoParamsSchema.shape.video_source.removeDefault().nullish(),
+
   /** Restricts the fan-out to specific segments; empty renders the whole book. */
   segment_indexes: z.array(z.number().int().min(0)).nullish(),
 });
@@ -282,6 +294,8 @@ export function renderParamsToDocument(request: BookRenderRequest): BookRenderPa
     template_id: request.template_id,
     template_parts: request.template_parts,
     template_accent: request.template_accent,
+    footage_enabled: request.footage_enabled,
+    footage_source: request.footage_source,
     font_name: request.font_name,
     font_size: request.font_size,
     text_fore_color: request.text_fore_color,

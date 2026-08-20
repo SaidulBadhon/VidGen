@@ -32,8 +32,13 @@ import type { BookDocument, BookRenderParamsDocument } from "../db/types.ts";
 import { TASK_STATE_COMPLETE, TASK_STATE_FAILED, TASK_STATE_PROCESSING } from "../models/const.ts";
 import { aspectToResolution, type VideoAspectValue } from "../models/schema.ts";
 import { videoParamsForBookRender } from "../models/bookSchema.ts";
-import { resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
+import { appConfig, resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
 import { getBgmFile, shouldUseBgm } from "../services/bgm.ts";
+import {
+  buildSegmentFootage,
+  ensureBookFootagePool,
+  footageSearchTerms,
+} from "../services/book/footage.ts";
 import {
   coverFileFingerprint,
   coverOverlayCacheName,
@@ -366,6 +371,15 @@ async function ensureSegmentCoverImage(
  * play: a key present with an `undefined` value would still be spread, and
  * would still be a difference for anyone comparing argument lists.
  */
+/**
+ * Encode profile for a footage body.
+ *
+ * 30 fps where the motion bed uses 15: a bed is a slow gradient that reads fine
+ * halved, and real footage at 15 fps judders visibly. The montage combineVideos
+ * hands over is already 30 fps, so this preserves it rather than resampling.
+ */
+export const FOOTAGE_ENCODE: BedEncodeProfile = { fps: 30, crf: 26, preset: "veryfast" };
+
 export interface SegmentTemplateAssets {
   bedPath?: string;
   cardPath?: string;
@@ -659,6 +673,82 @@ export async function resolveSegmentTemplateAssets(
  * own single-invocation guarantee is only worth anything if the caller does
  * not quietly hand it a different shape.
  */
+/**
+ * A segment's picture cut from stock footage, or null to fall through.
+ *
+ * Footage is the richest of three possible bodies and the only one that can fail
+ * for reasons outside this machine: a provider outage, an exhausted API key, a
+ * chapter too abstract to search for. So every failure here returns null and the
+ * caller drops to the motion bed, and then to the held still. A chapter must
+ * render.
+ *
+ * The pool is fetched once per book. That is not an optimisation — measured on a
+ * real 74-segment book, per-segment downloads come to roughly 230 GB against
+ * 4.7 GB pooled, so the pooled shape is the only one that exists.
+ */
+export async function resolveSegmentFootage(input: {
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  chapterTitle: string;
+  segmentIndex: number;
+  narrationText: string;
+  audioFile: string;
+  outputFile: string;
+  aspect: VideoAspectValue;
+  params: BookRenderParamsDocument;
+  threads?: number;
+  signal?: AbortSignal;
+  note?: (message: string) => void | Promise<void>;
+}): Promise<string | null> {
+  if (input.params.footage_enabled !== true) return null;
+
+  const source = input.params.footage_source || appConfig().video_source || "pexels";
+
+  try {
+    const { terms, source: termSource } = await footageSearchTerms({
+      bookTitle: input.bookTitle,
+      author: input.bookAuthor,
+      chapterTitle: input.chapterTitle,
+      text: input.narrationText,
+    });
+    if (terms.length === 0) {
+      await input.note?.("no search terms could be derived; rendering without footage");
+      return null;
+    }
+    await input.note?.(`footage terms (${termSource}): ${terms.slice(0, 4).join(", ")}`);
+
+    const clips = await ensureBookFootagePool({
+      bookId: input.bookId,
+      terms,
+      source,
+      aspect: input.aspect,
+      signal: input.signal,
+    });
+    if (clips.length === 0) {
+      await input.note?.(`no footage found on ${source}; rendering without it`);
+      return null;
+    }
+
+    await input.note?.(`cutting a montage from ${clips.length} clips`);
+    return await buildSegmentFootage({
+      clips,
+      audioFile: input.audioFile,
+      outputFile: input.outputFile,
+      aspect: input.aspect,
+      segmentIndex: input.segmentIndex,
+      threads: input.threads,
+      signal: input.signal,
+    });
+  } catch (error) {
+    // Cancellation is the user, not a degradation: let it stop the segment.
+    if (input.signal?.aborted) throw error;
+    logger.exception(`book footage failed for segment ${input.segmentIndex}`, error);
+    await input.note?.(`footage unavailable (${errorMessage(error)}); rendering without it`);
+    return null;
+  }
+}
+
 export function buildSegmentStillOptions(
   base: StillSegmentOptions,
   assets: SegmentTemplateAssets,
@@ -859,6 +949,30 @@ export async function runSegmentRender(
       },
     });
 
+    // Footage outranks the motion bed when it is switched on and succeeds; the
+    // card still rides on top of it, so the two are additive rather than
+    // alternatives. Everything else about the encode is unchanged, which is what
+    // lets a montage reuse the still renderer instead of needing a second path.
+    const footagePath = await resolveSegmentFootage({
+      bookId,
+      bookTitle: book.title,
+      bookAuthor: book.author,
+      chapterTitle: segment.title,
+      segmentIndex: index,
+      narrationText: text,
+      audioFile,
+      outputFile: join(directory, "footage.mp4"),
+      aspect: params.video_aspect as VideoAspectValue,
+      params,
+      threads: params.n_threads,
+      signal,
+      note: (message) => appendTaskLog(taskId, message),
+    });
+
+    const assets = footagePath
+      ? { ...templateAssets, bedPath: footagePath, bedEncode: FOOTAGE_ENCODE, fps: FOOTAGE_ENCODE.fps }
+      : templateAssets;
+
     const still = buildSegmentStillOptions(
       {
         imagePath: coverPath,
@@ -871,7 +985,7 @@ export async function runSegmentRender(
         threads: params.n_threads,
         signal,
       },
-      templateAssets,
+      assets,
     );
 
     try {

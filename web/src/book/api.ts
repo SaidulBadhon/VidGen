@@ -96,7 +96,14 @@ export const DEFAULT_SHORT_SECONDS = 60;
 export const MIN_MAX_SHORTS = 1;
 export const MAX_MAX_SHORTS = 30;
 export const DEFAULT_MAX_SHORTS = 12;
-export const VIDEO_SOURCES: readonly string[] = ["pexels", "pixabay", "coverr", "local"];
+/**
+ * The stock-footage providers, shared by the shorts form and book footage.
+ *
+ * `as const` so the union below can be derived instead of restated — a fifth
+ * provider reaches both sides without a second list to forget.
+ */
+export const VIDEO_SOURCES = ["pexels", "pixabay", "coverr", "local"] as const;
+export type FootageSource = (typeof VIDEO_SOURCES)[number];
 
 export const ACCEPTED_BOOK_EXTENSIONS = ".epub,.pdf,.txt,.md,.markdown,.text";
 export const ACCEPTED_COVER_EXTENSIONS = ".png,.jpg,.jpeg,.webp";
@@ -143,6 +150,10 @@ export interface BookRenderParams {
   template_id?: string;
   template_parts?: BookTemplatePart[];
   template_accent?: string;
+  /** Absent on books last rendered before stock footage existed. */
+  footage_enabled?: boolean;
+  /** Absent, or null, when the render deferred to the app's configured provider. */
+  footage_source?: FootageSource | null;
   font_name: string;
   font_size: number;
   text_fore_color: string;
@@ -155,7 +166,13 @@ export interface BookRenderParams {
   n_threads: number;
 }
 
-/** What a render form submits. Only `voice_name` is required; the rest default. */
+/**
+ * What a render form submits.
+ *
+ * `voice_name` and `footage_enabled` are the only required fields; everything
+ * else defaults server-side. See `footage_enabled` for why a boolean earns a
+ * place in that short list.
+ */
 export interface BookRenderRequest {
   voice_name: string;
   voice_rate?: number;
@@ -185,6 +202,18 @@ export interface BookRenderRequest {
   template_id?: string;
   template_parts?: BookTemplatePart[];
   template_accent?: string;
+  /**
+   * Whether every clip plays stock footage under the narration in place of the
+   * still cover.
+   *
+   * Required, not optional, because `false` is an instruction rather than an
+   * absence: it is the ask for exactly today's still, and an omitted flag would
+   * hand that decision to whatever the server currently defaults to. Same
+   * reasoning as the `""` template fields above — meaningful, so always sent.
+   */
+  footage_enabled: boolean;
+  /** Unset or null asks for whichever provider the app is configured with. */
+  footage_source?: FootageSource | null;
   segment_indexes?: number[];
 }
 

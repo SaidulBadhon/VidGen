@@ -264,6 +264,21 @@ export interface BookRenderParamsDocument {
   template_parts?: ("card" | "bed")[];
   /** Hex accent; absent and empty both mean the template's own default. */
   template_accent?: string;
+  /**
+   * Stock footage under the narration, absent on books stored before it
+   * existed — which is why both are optional. A missing `footage_enabled`
+   * reads as the same `false` the request schema defaults to, so an old book
+   * re-rendered after this shipped is handed an identical ffmpeg argument list
+   * rather than quietly gaining moving pictures beneath the still it was
+   * approved with.
+   */
+  footage_enabled?: boolean;
+  /**
+   * Which provider the clips come from. Absent and null both mean the same
+   * thing as an unset request field: use the app-level `video_source` setting,
+   * rather than pinning today's provider into the book forever.
+   */
+  footage_source?: "pexels" | "pixabay" | "coverr" | "local" | null;
 }
 
 /**

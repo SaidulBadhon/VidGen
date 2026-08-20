@@ -454,6 +454,84 @@ describe("bookRenderRequestSchema", () => {
     };
     expect(videoParamsForBookRender(withDefaults)).toEqual(videoParamsForBookRender(legacy));
   });
+
+  test("leaves footage off unless it is asked for", () => {
+    // Same rule the template defaults exist for: a book rendered before
+    // footage shipped and re-rendered after must be handed an identical ffmpeg
+    // argument list, so an omitted field has to mean "narration over the still
+    // exactly as before", never "unset, pick something sensible".
+    const parsed = bookRenderRequestSchema.parse({ voice_name: "v" });
+    expect(parsed.footage_enabled).toBe(false);
+    // Unset rather than "pexels": the provider is the app-level `video_source`
+    // setting's to choose until this book overrides it.
+    expect(parsed.footage_source).toBeUndefined();
+
+    const params = renderParamsToDocument(parsed);
+    expect(params.footage_enabled).toBe(false);
+    expect(params.footage_source).toBeUndefined();
+
+    // The vocabulary is the short-video product's, so a name it never had is
+    // refused here too.
+    expect(() =>
+      bookRenderRequestSchema.parse({ voice_name: "v", footage_source: "giphy" }),
+    ).toThrow();
+  });
+
+  test("carries a footage choice and its provider through to the stored render params", () => {
+    const params = renderParamsToDocument(
+      bookRenderRequestSchema.parse({
+        voice_name: "v",
+        footage_enabled: true,
+        footage_source: "pixabay",
+      }),
+    );
+    expect(params.footage_enabled).toBe(true);
+    expect(params.footage_source).toBe("pixabay");
+
+    // Enabled without a provider is a real request, not a half-filled one: it
+    // means "footage, from whatever the server is configured for".
+    const serverChoice = renderParamsToDocument(
+      bookRenderRequestSchema.parse({ voice_name: "v", footage_enabled: true }),
+    );
+    expect(serverChoice.footage_enabled).toBe(true);
+    expect(serverChoice.footage_source).toBeUndefined();
+  });
+
+  test("renders a stored document that predates footage exactly as it did before", () => {
+    // Both fields are optional on the document for this row's sake: it was
+    // written before footage existed and must keep re-rendering as the still it
+    // was, so a missing `footage_enabled` has to behave as the same `false` the
+    // request schema defaults to.
+    const legacy: BookRenderParamsDocument = {
+      voice_name: "en-US-JennyNeural",
+      voice_rate: 1,
+      voice_volume: 1,
+      subtitle_render_mode: "soft",
+      video_aspect: "16:9",
+      font_name: "MicrosoftYaHeiBold.ttc",
+      font_size: 60,
+      text_fore_color: "#FFFFFF",
+      stroke_color: "#000000",
+      stroke_width: 1.5,
+      text_background_color: false,
+      rounded_subtitle_background: false,
+      subtitle_position: "bottom",
+      custom_position: 70,
+      n_threads: 2,
+    };
+    expect(legacy.footage_enabled).toBeUndefined();
+    expect(legacy.footage_source).toBeUndefined();
+
+    // Same document with the new defaults written in, including the null a
+    // nullish request field stores. The params the renderer is handed are
+    // identical, which is the whole point of the off-by-default value.
+    const withDefaults: BookRenderParamsDocument = {
+      ...legacy,
+      footage_enabled: false,
+      footage_source: null,
+    };
+    expect(videoParamsForBookRender(withDefaults)).toEqual(videoParamsForBookRender(legacy));
+  });
 });
 
 // ---------------------------------------------------------------------------

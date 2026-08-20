@@ -35,6 +35,7 @@ import {
   COVER_TITLE_POSITIONS,
   SUBTITLE_RENDER_MODES,
   VIDEO_ASPECTS,
+  VIDEO_SOURCES,
   bookApi,
   bookTemplatesOf,
   errorText,
@@ -49,6 +50,7 @@ import {
   type BookTemplateMetadata,
   type BookTemplatePart,
   type CoverTitlePosition,
+  type FootageSource,
   type SubtitleRenderMode,
 } from "./api.ts";
 import { DEFAULT_TTS_SERVER, DEFAULT_VOICE_NAME, inferTtsServerFromVoice, voiceFromSettings } from "../lib/voices.ts";
@@ -58,6 +60,8 @@ import { SegmentTitleEditor } from "./SegmentTitleEditor.tsx";
 const DEFAULT_FONT = "__default__";
 /** Same trick for "no template": the plain still is a real choice, not a blank row. */
 const DEFAULT_TEMPLATE = "__default__";
+/** And again for footage: deferring to the app's configured provider is a choice too. */
+const DEFAULT_FOOTAGE_SOURCE = "__default__";
 
 const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   voice_name: DEFAULT_VOICE_NAME,
@@ -83,6 +87,11 @@ const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   template_id: "",
   template_parts: [],
   template_accent: "",
+  // Off for the same reason again, and this one costs the most to get wrong:
+  // footage re-encodes every clip against downloaded video. Null source means
+  // "whatever the app is configured with", which only matters once it is on.
+  footage_enabled: false,
+  footage_source: null,
 };
 
 type RenderForm = typeof DEFAULT_FORM;
@@ -398,6 +407,55 @@ function TemplatePicker({
   );
 }
 
+/**
+ * Stock-footage controls: whether clips play real video under the narration,
+ * and which provider it is pulled from.
+ *
+ * Unlike TemplatePicker this never hides itself — footage needs no Node and no
+ * Chrome, so every host can offer it. The hint stays visible with the switch
+ * off because the cost is the thing worth knowing *before* flipping it.
+ */
+function FootagePicker({
+  enabled,
+  source,
+  onEnabledChange,
+  onSourceChange,
+}: {
+  enabled: boolean;
+  source: FootageSource | null;
+  onEnabledChange: (enabled: boolean) => void;
+  onSourceChange: (source: FootageSource | null) => void;
+}) {
+  const { t } = useI18n();
+
+  return (
+    <>
+      <hr className="border-border" />
+
+      <Switch checked={enabled} onCheckedChange={onEnabledChange} label={t("Book Footage")} />
+      <p className="text-xs text-muted-foreground">{t("Book Footage Hint")}</p>
+
+      {enabled && (
+        <Field label={t("Book Footage Source")} hint={t("Book Footage Source Hint")}>
+          <Select
+            value={source ?? DEFAULT_FOOTAGE_SOURCE}
+            onValueChange={(value) =>
+              onSourceChange(value === DEFAULT_FOOTAGE_SOURCE ? null : (value as FootageSource))
+            }
+            options={[
+              { value: DEFAULT_FOOTAGE_SOURCE, label: t("Book Footage Source Default") },
+              ...VIDEO_SOURCES.map((provider) => ({
+                value: provider,
+                label: t(`Book Footage Source ${provider}`),
+              })),
+            ]}
+          />
+        </Field>
+      )}
+    </>
+  );
+}
+
 function storedCoverPosition(
   value: string | undefined,
   fallback?: string,
@@ -493,6 +551,11 @@ export function RenderPanel({
       template_id: stored.template_id ?? "",
       template_parts: stored.template_parts ?? [],
       template_accent: stored.template_accent ?? "",
+      // A book rendered before footage existed stores neither field, and has to
+      // come back as the still it was rendered as — never as footage nobody
+      // asked for and would then wait hours on.
+      footage_enabled: stored.footage_enabled ?? false,
+      footage_source: stored.footage_source ?? null,
     });
     setTtsServer(inferTtsServerFromVoice(stored.voice_name));
   }, [bookId, storedKey, stored, settings.isSuccess, settings.data]);
@@ -517,10 +580,11 @@ export function RenderPanel({
     // An empty font means "whatever the server defaults to"; sending "" would
     // be taken as a real font name and fail at the ASS writer.
     //
-    // The template fields are deliberately *not* given the same treatment.
-    // There "" is the documented no-op the schema defaults to, so dropping it
-    // and sending it are the same request — and keeping it makes the body say
-    // out loud that this render wants the plain still.
+    // The template and footage fields are deliberately *not* given the same
+    // treatment. There "", `false` and a null source are the documented no-ops
+    // the schema defaults to, so dropping them and sending them are the same
+    // request — and keeping them makes the body say out loud that this render
+    // wants the plain still.
     if (!body.font_name) delete body.font_name;
     return body;
   };
@@ -644,6 +708,13 @@ export function RenderPanel({
               onTemplateChange={chooseTemplate}
               onPartsChange={(parts) => set("template_parts", parts)}
               onAccentChange={(accent) => set("template_accent", accent)}
+            />
+
+            <FootagePicker
+              enabled={form.footage_enabled}
+              source={form.footage_source}
+              onEnabledChange={(value) => set("footage_enabled", value)}
+              onSourceChange={(value) => set("footage_source", value)}
             />
           </div>
         </Card>
