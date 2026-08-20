@@ -60,6 +60,15 @@ export type SegmentMode = "chapter" | "duration" | "smart";
 export type SubtitleRenderMode = "burn" | "soft" | "none";
 /** The AI providers the short-video form offers cannot score a chapter-length segment. */
 export type BookBgmType = "" | "random" | "custom";
+/**
+ * Which parts of a book-video template reach the finished segment.
+ *
+ * `card` is the opening title composition laid over the first seconds; `bed`
+ * replaces the static still with a moving background for the whole body. They
+ * are two ticks rather than one because they cost very different things — a
+ * card is one short render, a bed re-encodes every segment.
+ */
+export type BookTemplatePart = "card" | "bed";
 /** `llm` is not produced yet; the filter is structural-only for now. */
 export type DecisionSource = "structural" | "user" | "llm";
 
@@ -67,6 +76,8 @@ export const SEGMENT_MODES: readonly SegmentMode[] = ["chapter", "duration", "sm
 export const SUBTITLE_RENDER_MODES: readonly SubtitleRenderMode[] = ["burn", "soft", "none"];
 export const VIDEO_ASPECTS: readonly string[] = ["16:9", "9:16", "1:1"];
 export const BOOK_BGM_TYPES: readonly BookBgmType[] = ["", "random", "custom"];
+/** Canonical order for the part checkboxes; mirrors `BOOK_TEMPLATE_PARTS` on the server. */
+export const BOOK_TEMPLATE_PARTS: readonly BookTemplatePart[] = ["card", "bed"];
 
 /**
  * Bounds copied from models/bookSchema.ts.
@@ -128,6 +139,10 @@ export interface BookRenderParams {
   cover_chapter_title_position?: CoverTitlePosition;
   /** Single pad from before the titles could move independently. */
   cover_title_position?: CoverTitlePosition;
+  /** Absent on books last rendered before motion templates existed. */
+  template_id?: string;
+  template_parts?: BookTemplatePart[];
+  template_accent?: string;
   font_name: string;
   font_size: number;
   text_fore_color: string;
@@ -157,7 +172,50 @@ export interface BookRenderRequest {
   burn_chapter_title?: boolean;
   cover_book_title_position?: CoverTitlePosition;
   cover_chapter_title_position?: CoverTitlePosition;
+  /**
+   * The template to apply, named by the metadata entry's `id` — the two sides
+   * use different key names on purpose, so the form reads `id` off the dropdown
+   * entry and sends it here as `template_id`.
+   *
+   * `""` on all three is not "unset, pick something sensible": it is the
+   * documented request for exactly today's static still, and the server's zod
+   * schema defaults each of them to it. Unlike `font_name`, an empty string
+   * here is meaningful and must be sent rather than stripped.
+   */
+  template_id?: string;
+  template_parts?: BookTemplatePart[];
+  template_accent?: string;
   segment_indexes?: number[];
+}
+
+/**
+ * One book-video template as `GET /settings/metadata` serves it.
+ *
+ * Only the fields a dropdown draws itself from cross the wire; the manifest's
+ * durations and encode profile stay the renderer's business.
+ */
+export interface BookTemplateMetadata {
+  id: string;
+  label: string;
+  description: string;
+  /** What this template actually ships — never assume both parts exist. */
+  parts: BookTemplatePart[];
+  default_accent: string;
+}
+
+/**
+ * Pulls the template list out of a settings-metadata payload.
+ *
+ * Read defensively because the key is genuinely optional on the wire: a server
+ * older than this feature omits it, and a host that cannot run a HyperFrames
+ * render serves `[]`. Both mean the same thing to the form — no templates, hide
+ * the control — so both come back as an empty array rather than as an
+ * `undefined` every caller would have to remember to check. `SettingsMetadata`
+ * in ../api/client.ts does not declare the key, hence the structural read.
+ */
+export function bookTemplatesOf(metadata: unknown): BookTemplateMetadata[] {
+  const value = (metadata as { book_templates?: unknown } | null | undefined)?.book_templates;
+  return Array.isArray(value) ? (value as BookTemplateMetadata[]) : [];
 }
 
 export type BookShortState = "pending" | "queued" | "rendering" | "complete" | "failed";

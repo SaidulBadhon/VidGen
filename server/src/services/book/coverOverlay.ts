@@ -10,6 +10,7 @@
  * one.
  */
 
+import { statSync } from "node:fs";
 import { createCanvas, loadImage, type SKRSContext2D } from "@napi-rs/canvas";
 import {
   COVER_TITLE_POSITIONS,
@@ -215,6 +216,40 @@ export function mergeCoverScrims(scrims: readonly CoverScrim[]): CoverScrim[] {
  * different picture, and an upload vs a blank background are different even
  * when the titles match.
  */
+/**
+ * Cheap identity for an uploaded cover's *content*.
+ *
+ * Size and mtime rather than a hash of the bytes: this runs once per segment,
+ * before the cache lookup that would otherwise avoid the work, and a cover may
+ * be twelve megabytes. A stat is free where re-reading the file 300 times for
+ * one book is not. Any write through `POST /books/:id/cover` moves mtime, which
+ * is the only way a cover changes in practice.
+ *
+ * An unreadable or absent path answers `""` — the same value a book with no
+ * cover produces — because "there is no usable cover here" is exactly what the
+ * caller then renders.
+ */
+export function coverFileFingerprint(path: string | null | undefined): string {
+  if (!path) return "";
+  try {
+    const stats = statSync(path);
+    return `${stats.size}:${Math.trunc(stats.mtimeMs)}`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Filename for one burned overlay.
+ *
+ * `coverFingerprint` is load-bearing and was missing until it caused a real
+ * bug. The key used to describe the source as only `sourceKind` — "is there an
+ * uploaded cover at all" — so replacing a book's cover with a different image
+ * left every key identical, `ensureSegmentCoverImage` found its stale file on
+ * disk, and every re-rendered segment kept showing the OLD artwork while
+ * reporting success. Identifying the *file* rather than its existence is what
+ * makes the cache self-invalidating.
+ */
 export function coverOverlayCacheName(input: {
   width: number;
   height: number;
@@ -223,6 +258,8 @@ export function coverOverlayCacheName(input: {
   burnBookTitle: boolean;
   burnChapterTitle: boolean;
   sourceKind: "upload" | "blank";
+  /** From coverFileFingerprint(); `""` when the still is generated, not uploaded. */
+  coverFingerprint?: string;
   bookPosition?: CoverTitlePosition | string | null;
   chapterPosition?: CoverTitlePosition | string | null;
 }): string {
@@ -240,6 +277,7 @@ export function coverOverlayCacheName(input: {
       burnBookTitle: input.burnBookTitle,
       burnChapterTitle: input.burnChapterTitle,
       sourceKind: input.sourceKind,
+      coverFingerprint: input.coverFingerprint ?? "",
       bookPosition: positions.book,
       chapterPosition: positions.chapter,
     }),

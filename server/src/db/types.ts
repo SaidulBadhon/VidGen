@@ -252,6 +252,18 @@ export interface BookRenderParamsDocument {
   cover_chapter_title_position?: string;
   /** Single pad from before the titles could move independently. */
   cover_title_position?: string;
+  /**
+   * HyperFrames template, absent on books stored before templates existed —
+   * which is why all three are optional. A missing field reads as the same
+   * no-op the request schema defaults to, so an old book re-rendered after
+   * this shipped is handed an identical ffmpeg argument list rather than
+   * quietly gaining a moving background it was never set up with.
+   */
+  template_id?: string;
+  /** Which parts reach the segment; absent and empty both apply none of it. */
+  template_parts?: ("card" | "bed")[];
+  /** Hex accent; absent and empty both mean the template's own default. */
+  template_accent?: string;
 }
 
 /**
@@ -383,6 +395,12 @@ export interface BookShortsRenderParamsDocument {
   font_name: string;
   font_size: number;
   n_threads: number;
+  /**
+   * HyperFrames template, absent on shorts stored before templates existed.
+   * Optional for the same reason it is on the book: a missing value is the
+   * stock-footage path, which is what those rows were rendered with.
+   */
+  template_id?: string;
 }
 
 /**

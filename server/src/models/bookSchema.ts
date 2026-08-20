@@ -199,6 +199,18 @@ export const SUBTITLE_RENDER_MODES = ["burn", "soft", "none"] as const;
  */
 export const BOOK_BGM_TYPES = ["", "random", "custom"] as const;
 
+/**
+ * Which parts of a template reach the finished segment.
+ *
+ * `card` is the opening title composition overlaid on the first seconds;
+ * `bed` replaces the static still with a moving background for the whole
+ * body. They are listed separately rather than folded into `template_id`
+ * because they cost different things — a card is one short render, a bed
+ * re-encodes every segment — so choosing a template and applying it to the
+ * body have to stay two decisions.
+ */
+export const BOOK_TEMPLATE_PARTS = ["card", "bed"] as const;
+
 export const bookRenderRequestSchema = z.object({
   voice_name: z.string().min(1),
   voice_rate: z.number().min(0.5).max(2).default(1),
@@ -235,6 +247,19 @@ export const bookRenderRequestSchema = z.object({
   cover_book_title_position: z.enum(COVER_TITLE_POSITIONS).default(DEFAULT_COVER_TITLE_POSITION),
   cover_chapter_title_position: z.enum(COVER_TITLE_POSITIONS).default(DEFAULT_COVER_TITLE_POSITION),
 
+  // All three template fields default to their no-op value for the same reason
+  // `burn_book_title` defaults to false: a book rendered before templates
+  // shipped and re-rendered after must be handed an identical ffmpeg argument
+  // list. Empty here is not "unset, pick something sensible" — it is the
+  // documented way to ask for exactly today's static still.
+  template_id: z.string().default(""),
+  // Empty applies none of the template, so a template can be chosen and stored
+  // without a single segment encoding differently until a part is ticked.
+  template_parts: z.array(z.enum(BOOK_TEMPLATE_PARTS)).default([]),
+  // Empty defers to the accent the template ships with, rather than having this
+  // form invent a colour; there is no neutral hex that means "no opinion".
+  template_accent: z.string().default(""),
+
   /** Restricts the fan-out to specific segments; empty renders the whole book. */
   segment_indexes: z.array(z.number().int().min(0)).nullish(),
 });
@@ -254,6 +279,9 @@ export function renderParamsToDocument(request: BookRenderRequest): BookRenderPa
     burn_chapter_title: request.burn_chapter_title,
     cover_book_title_position: request.cover_book_title_position,
     cover_chapter_title_position: request.cover_chapter_title_position,
+    template_id: request.template_id,
+    template_parts: request.template_parts,
+    template_accent: request.template_accent,
     font_name: request.font_name,
     font_size: request.font_size,
     text_fore_color: request.text_fore_color,
@@ -362,6 +390,10 @@ export const bookShortsRenderRequestSchema = z.object({
   bgm_volume: z.number().min(0).max(1).default(0.2),
   font_name: videoParamsSchema.shape.font_name,
   font_size: videoParamsSchema.shape.font_size,
+  // A short is one composition or none, so there are no parts to pick and no
+  // body to leave alone. Empty is the stock-footage path exactly as it is
+  // today, for the same reason it is on the book render form.
+  template_id: z.string().default(""),
   n_threads: z.number().int().min(1).max(64).default(2),
   indexes: z.array(z.number().int().min(0)).nullish(),
 });
@@ -381,17 +413,46 @@ export function shortsRenderParamsToDocument(
     bgm_volume: request.bgm_volume,
     font_name: request.font_name,
     font_size: request.font_size,
+    template_id: request.template_id,
     n_threads: request.n_threads,
   };
 }
 
+/**
+ * `VideoParams` plus the three book fields a templated short needs.
+ *
+ * They ride alongside rather than inside `videoParamsSchema` because that
+ * schema is the short-video product's own vocabulary, and a book-only field
+ * added there would land on every task the server has ever created. Everything
+ * downstream takes a `VideoParams` and simply ignores the extra keys, so an
+ * untemplated short is driven by exactly the values it was driven by before.
+ */
+export type BookShortVideoParams = VideoParams & {
+  /** The scroll-stopping opening line; `""` when the short has none. */
+  hook: string;
+  /** Chapter the excerpt was lifted from; `""` when it is not known. */
+  chapter_title: string;
+  /** `""` = the stock-footage path, exactly as today. */
+  template_id: string;
+};
+
+/**
+ * Adapts one stored short to the params its render takes.
+ *
+ * `hook` and `chapter_title` are optional because both call sites in
+ * `bookShortsPipeline.ts` predate them and a short row is not guaranteed to
+ * carry either; absent means empty, which is what a template reads as "no hook
+ * line" rather than as a reason to fail.
+ */
 export function videoParamsForBookShort(options: {
   title: string;
   script: string;
   language: string;
   params: BookShortsRenderParamsDocument;
-}): VideoParams {
-  return videoParamsSchema.parse({
+  hook?: string;
+  chapter_title?: string;
+}): BookShortVideoParams {
+  const params = videoParamsSchema.parse({
     video_subject: options.title,
     video_script: options.script,
     video_aspect: options.params.video_aspect || "9:16",
@@ -410,4 +471,11 @@ export function videoParamsForBookShort(options: {
     font_size: options.params.font_size,
     n_threads: options.params.n_threads,
   });
+
+  return {
+    ...params,
+    hook: options.hook ?? "",
+    chapter_title: options.chapter_title ?? "",
+    template_id: options.params.template_id ?? "",
+  };
 }

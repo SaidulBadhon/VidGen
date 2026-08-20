@@ -1,0 +1,46 @@
+{
+  "id": "classic",
+  "label": "Classic",
+  "description": "Literary typography over a slow accent-coloured light field. Calm enough to sit under eleven minutes of narration without competing with burned-in captions.",
+  "parts": ["card", "bed", "short"],
+  "defaultAccent": "#7aa2f7",
+
+  "card": {
+    "duration": 8,
+    "fadeOutSeconds": 1.4,
+    "variables": ["bookTitle", "bookAuthor", "chapterTitle", "accent"]
+  },
+
+  "bed": {
+    "duration": 20,
+    "variables": ["accent"],
+    "//": "The bed does NOT depend on the cover, so its cache key is (accent, aspect) — one render per accent, not per book.",
+    "seamless": true
+  },
+
+  "short": {
+    "durationIsRuntime": true,
+    "//": "Root data-duration is read at compile time and cannot be driven by --variables, so the renderer must write it into a working copy before rendering.",
+    "variables": ["bookTitle", "chapterTitle", "hookText", "accent"]
+  },
+
+  "bedEncode": {
+    "//": "Applied to the BODY encode, replacing codecQualityArgs() defaults. -tune stillimage must also be suppressed: it is correct for a held PNG and wrong for moving content.",
+    "fps": 15,
+    "crf": 26,
+    "preset": "veryfast"
+  },
+
+  "measured": {
+    "//": "Recorded during the T0 spike on an M4 Pro against a real 815.951s segment. Timings are machine-specific; ratios are the durable part.",
+    "segmentSeconds": 815.951,
+    "bodyEncodeSecondsWithBed": 264,
+    "bodyEncodeSecondsStillToday": 96.5,
+    "segmentMegabytesWithBed": 60.1,
+    "segmentMegabytesShippedToday": 26.5,
+    "bedRenderSeconds": 47.6,
+    "cardRenderSeconds": 25.3,
+    "seamPsnrDb": 46.25,
+    "adjacentFramePsnrDb": 46.68
+  }
+}

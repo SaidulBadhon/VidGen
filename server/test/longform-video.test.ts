@@ -36,6 +36,9 @@ import {
   buildStillAudioChains,
   buildStillFilterGraph,
   buildSubtitlesFilter,
+  DEFAULT_BED_ENCODE,
+  resolveStillFps,
+  STILL_FRAMERATE,
 } from "../src/services/video/still.ts";
 import {
   buildSoftSubtitleArgs,
@@ -702,6 +705,240 @@ describe("buildStillArgs", () => {
       expect(args).not.toContain("-stream_loop");
       expect(args).not.toContain("-filter_complex");
       expect(args).toContain("-vf");
+    });
+  });
+});
+
+/**
+ * The motion-bed and card shapes, which replace the *picture* only.
+ *
+ * Deliberately a parallel block rather than extra cases in the one above: every
+ * assertion there describes the held-still path, which stays reachable and must
+ * keep passing verbatim — including the `-tune stillimage` and `-crf 23` it
+ * asserts, both of which are wrong for a bed.
+ */
+describe("buildStillArgs — bed", () => {
+  const input = {
+    imagePath: "/tmp/cover.png",
+    audioPath: "/tmp/chapter.mp3",
+    outputFile: "/tmp/segment.mp4",
+    width: 1920,
+    height: 1080,
+    // T0's real chapter, so the numbers here are the ones that were measured.
+    duration: 815.951,
+    audioSampleRate: 24000,
+    fps: 15,
+    threads: 4,
+  };
+
+  const bed = {
+    ...input,
+    bedPath: "/tmp/bed.mp4",
+    bedEncode: { fps: 15, crf: 26, preset: "veryfast" },
+  };
+
+  test("loops the bed as a file rather than holding one frame", () => {
+    const args = buildStillArgs(bed, "libx264");
+    expect(args.slice(0, 5)).toEqual(["-y", "-stream_loop", "-1", "-i", "/tmp/bed.mp4"]);
+    // A different argument shape, not a path swap: -loop/-framerate describe an
+    // image being held, and would retime a real video's motion.
+    expect(args).not.toContain("-loop");
+    expect(args).not.toContain("-framerate");
+    expect(args).not.toContain("/tmp/cover.png");
+  });
+
+  test("keeps the narration at input 1, where the audio map and the mix expect it", () => {
+    const args = buildStillArgs(bed, "libx264");
+    expect(args[args.indexOf("/tmp/chapter.mp3") - 1]).toBe("-i");
+    expect(args.join(" ")).toContain("-map 1:a:0");
+  });
+
+  test("drops the still tune, which biases the encoder towards a picture that never changes", () => {
+    expect(buildStillArgs(bed, "libx264")).not.toContain("stillimage");
+  });
+
+  test("encodes the body with the bed profile, not the still defaults", () => {
+    const args = buildStillArgs(bed, "libx264").join(" ");
+    expect(args).toContain("-preset veryfast");
+    expect(args).toContain("-crf 26");
+    expect(args).not.toContain("-preset medium");
+    expect(args).not.toContain("-crf 23");
+  });
+
+  test("falls back to the measured profile when a bed arrives without one", () => {
+    const { bedEncode, ...unprofiled } = bed;
+    const args = buildStillArgs(unprofiled, "libx264").join(" ");
+    expect(args).toContain(`-preset ${DEFAULT_BED_ENCODE.preset}`);
+    expect(args).toContain(`-crf ${DEFAULT_BED_ENCODE.crf}`);
+    expect(args).not.toContain("-crf 23");
+  });
+
+  test("leaves a hardware encoder its own flags, since -crf is an x264 spelling", () => {
+    const args = buildStillArgs(bed, "h264_videotoolbox");
+    expect(args.join(" ")).toContain("-b:v 6M");
+    expect(args).not.toContain("-crf");
+  });
+
+  test("skips the fit filter a bed does not need", () => {
+    // The bed is rendered at the target size; the fit would rescale and re-pad
+    // every frame for nothing, which T0 measured at ~7% of the body encode.
+    const args = buildStillArgs(bed, "libx264");
+    expect(args).not.toContain("-vf");
+    expect(args).not.toContain("-filter_complex");
+    expect(args.join(" ")).not.toContain("scale=1920:1080");
+    expect(args.join(" ")).toContain("-map 0:v:0");
+  });
+
+  test("still burns captions over the bed when one is asked for", () => {
+    const args = buildStillArgs({ ...bed, assPath: "/tmp/subs.ass", fontsDir: "/fonts" }, "libx264");
+    expect(args[args.indexOf("-vf") + 1]).toBe("subtitles=filename=/tmp/subs.ass:fontsdir=/fonts");
+  });
+
+  test("refuses the bed when the narration length is unknown, and falls back to the still", () => {
+    // -t is omitted without a duration, and -shortest against an endlessly
+    // looping video never terminates — a wedged encode holds a concurrency
+    // slot for good.
+    const args = buildStillArgs({ ...bed, duration: 0 }, "libx264");
+    expect(args.slice(0, 7)).toEqual(["-y", "-loop", "1", "-framerate", "15", "-i", "/tmp/cover.png"]);
+    expect(args).not.toContain("-stream_loop");
+    expect(args).not.toContain("/tmp/bed.mp4");
+    expect(args).not.toContain("-t");
+    // The whole still shape comes back with it, not just the input.
+    expect(args).toContain("stillimage");
+    expect(args.join(" ")).toContain("-crf 23");
+    expect(args.join(" ")).toContain("scale=1920:1080");
+  });
+
+  test("refuses to build anything when the bed is unusable and there is no still to fall back to", () => {
+    const { imagePath, ...bedOnly } = bed;
+    expect(() => buildStillArgs({ ...bedOnly, duration: 0 }, "libx264")).toThrow(/imagePath/);
+  });
+
+  test("takes the frame rate from the options rather than the still default", () => {
+    expect(buildStillArgs(bed, "libx264").join(" ")).toContain("-r 15");
+    expect(buildStillArgs({ ...bed, fps: 24 }, "libx264").join(" ")).toContain("-r 24");
+    expect(buildStillArgs(bed, "libx264").join(" ")).not.toContain(`-r ${STILL_FRAMERATE}`);
+  });
+
+  test("resolves the rate from the options first, then the bed profile, then the still default", () => {
+    // 5 fps is invisible on a held picture and a visible strobe on a moving one.
+    expect(resolveStillFps(24, DEFAULT_BED_ENCODE)).toBe(24);
+    expect(resolveStillFps(undefined, DEFAULT_BED_ENCODE)).toBe(DEFAULT_BED_ENCODE.fps);
+    expect(resolveStillFps(0, DEFAULT_BED_ENCODE)).toBe(DEFAULT_BED_ENCODE.fps);
+    expect(resolveStillFps(undefined)).toBe(STILL_FRAMERATE);
+  });
+
+  describe("with a card over the opening", () => {
+    const carded = { ...bed, cardPath: "/tmp/card.mp4", cardDuration: 8 };
+
+    /**
+     * Every argument that decides what the segment sounds like and where it
+     * ends. Video maps are excluded on purpose — those are exactly what a card
+     * is allowed to change.
+     */
+    function audioHalf(args: string[]): string[] {
+      const kept: string[] = [];
+      for (let i = 0; i < args.length; i += 1) {
+        const flag = args[i]!;
+        const value = args[i + 1] ?? "";
+        if (flag === "-map" && (value.includes(":a:") || value === "[aout]")) {
+          kept.push(flag, value);
+          i += 1;
+        } else if (flag === "-c:a" || flag === "-b:a" || flag === "-ar" || flag === "-t") {
+          kept.push(flag, value);
+          i += 1;
+        } else if (flag === "-shortest") {
+          kept.push(flag);
+        }
+      }
+      return kept;
+    }
+
+    test("appends the card after the audio inputs, never before them", () => {
+      const args = buildStillArgs(carded, "libx264");
+      expect(args[args.indexOf("/tmp/card.mp4") - 1]).toBe("-i");
+      // A card at input 1 would renumber the narration and point the mix at a
+      // video stream; last is the only index that moves nothing.
+      expect(args.indexOf("/tmp/card.mp4")).toBeGreaterThan(args.indexOf("/tmp/chapter.mp3"));
+      expect(args.lastIndexOf("-i")).toBe(args.indexOf("/tmp/card.mp4") - 1);
+    });
+
+    test("dissolves the card into the bed on its own alpha, gated to its window", () => {
+      const graph = buildStillArgs(carded, "libx264")[
+        buildStillArgs(carded, "libx264").indexOf("-filter_complex") + 1
+      ]!;
+      expect(graph).toBe(
+        "[2:v]format=yuva420p,fade=t=out:st=6.6:d=1.4:alpha=1[card];" +
+          "[0:v][card]overlay=0:0:enable='between(t,0,8)'[v]",
+      );
+    });
+
+    test("leaves the audio half of the graph byte-identical to the same render without a card", () => {
+      // The narration-safety invariant. A previous design that touched this
+      // path produced silent chapter videos that exited 0.
+      const withCard = buildStillArgs(carded, "libx264");
+      const withoutCard = buildStillArgs(bed, "libx264");
+      expect(audioHalf(withCard)).toEqual(audioHalf(withoutCard));
+      expect(audioHalf(withCard)).toEqual([
+        "-map",
+        "1:a:0",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        "24000",
+        "-t",
+        "815.951",
+        "-shortest",
+      ]);
+      // The narration also has to sit at the same input index in both.
+      expect(withCard.indexOf("/tmp/chapter.mp3")).toBe(withoutCard.indexOf("/tmp/chapter.mp3"));
+      expect(withCard.join(" ")).toContain("overlay=");
+    });
+
+    test("holds that invariant with music mixed in as well", () => {
+      const scored = { bgmPath: "/tmp/calm.mp3", bgmVolume: 0.2 };
+      const withCard = buildStillArgs({ ...carded, ...scored }, "libx264");
+      const withoutCard = buildStillArgs({ ...bed, ...scored }, "libx264");
+      expect(audioHalf(withCard)).toEqual(audioHalf(withoutCard));
+
+      // The mix still reads inputs 1 and 2, so the card must be input 3.
+      const graph = withCard[withCard.indexOf("-filter_complex") + 1]!;
+      expect(graph).toContain("[2:a]volume=0.2");
+      expect(graph).toContain("[1:a][bgm]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]");
+      expect(graph).toContain("[3:v]format=yuva420p");
+      expect(withCard.join(" ")).toContain("-map [aout]");
+    });
+
+    test("draws burned captions on top of the card rather than under it", () => {
+      const args = buildStillArgs({ ...carded, assPath: "/tmp/subs.ass" }, "libx264");
+      const graph = args[args.indexOf("-filter_complex") + 1]!;
+      expect(graph).toContain("overlay=0:0:enable='between(t,0,8)',subtitles=filename=/tmp/subs.ass[v]");
+      // Under an opaque card, the first seconds of every chapter's cues would
+      // simply be invisible.
+      expect(graph.indexOf("subtitles=")).toBeGreaterThan(graph.indexOf("overlay="));
+    });
+
+    test("fits the still before compositing when there is no bed", () => {
+      const { bedPath, bedEncode, ...overStill } = carded;
+      const args = buildStillArgs(overStill, "libx264");
+      const graph = args[args.indexOf("-filter_complex") + 1]!;
+      // A cover is any size at all, so it has to reach the frame size before
+      // a 1920x1080 card is laid over it at 0:0.
+      expect(graph).toStartWith("[0:v]scale=1920:1080");
+      expect(graph).toContain("setsar=1[body];");
+      expect(graph).toContain("[body][card]overlay=0:0");
+      // and the still path keeps its own encoder settings.
+      expect(args).toContain("stillimage");
+      expect(args.join(" ")).toContain("-crf 23");
+    });
+
+    test("ignores a card with no duration, since an unbounded overlay hides the chapter", () => {
+      const args = buildStillArgs({ ...carded, cardDuration: 0 }, "libx264");
+      expect(args).not.toContain("/tmp/card.mp4");
+      expect(args.join(" ")).not.toContain("overlay=");
+      expect(args.join(" ")).toContain("-map 0:v:0");
     });
   });
 });

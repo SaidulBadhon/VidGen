@@ -1184,6 +1184,16 @@ bookRouter.post("/books/:id/cover", async (c) => {
   // its demuxer from what the file actually is.
   const coverPath = join(bookDir(bookId), `cover.${format === "jpeg" ? "jpg" : format}`);
   await Bun.write(coverPath, bytes);
+
+  // Drop the overlays burned onto the previous cover.
+  //
+  // Correctness no longer depends on this: the overlay cache key carries a
+  // fingerprint of the cover file, so a replaced cover already misses the cache
+  // and re-rasterises. What this prevents is the *disk* cost — without it every
+  // cover swap strands a full set of per-chapter overlays that nothing will ever
+  // read again, and nothing else in the codebase prunes that directory.
+  await rm(join(bookDir(bookId), "cover-overlays"), { recursive: true, force: true });
+
   await bumpBookRevision(bookId, { cover_path: coverPath });
 
   logger.info(`book cover updated: ${bookId} (${format}, ${bytes.byteLength} bytes)`);

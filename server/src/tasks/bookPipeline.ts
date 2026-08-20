@@ -12,7 +12,7 @@
  */
 
 import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { rename, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import {
@@ -35,6 +35,7 @@ import { videoParamsForBookRender } from "../models/bookSchema.ts";
 import { resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
 import { getBgmFile, shouldUseBgm } from "../services/bgm.ts";
 import {
+  coverFileFingerprint,
   coverOverlayCacheName,
   coverOverlayCopy,
   coverTitlePositionsFromParams,
@@ -49,8 +50,10 @@ import type { Block, BookStructure, FilterDecision, SegmentOptions } from "../se
 import { assRenderOptionsFromParams, writeAssFile } from "../services/subtitle/ass.ts";
 import { writeSrtFile } from "../services/subtitle/srt.ts";
 import { supportsAssBurn } from "../services/video/capabilities.ts";
+import { hyperframesAvailable, renderComposition } from "../services/video/hyperframes.ts";
 import { muxSoftSubtitles, sidecarSubtitlePath } from "../services/video/softSubs.ts";
-import { renderStillSegment } from "../services/video/still.ts";
+import { renderStillSegment, type BedEncodeProfile, type StillSegmentOptions } from "../services/video/still.ts";
+import { getTemplate, templatePartDir, type TemplateManifest, type TemplatePart } from "../services/video/templates.ts";
 import { synthesizeLongform } from "../services/voice/longform.ts";
 import { errorMessage, logger } from "../utils/logger.ts";
 import { getUuid } from "../utils/misc.ts";
@@ -73,6 +76,21 @@ export const BOOK_SEGMENT_CONCURRENCY = 2;
 /** Share of task progress spent on narration; the rest is the video encode. */
 const SYNTHESIS_PROGRESS_SHARE = 0.7;
 const SYNTHESIS_PROGRESS_FLOOR = 5;
+
+/** Where the bar stands once narration is written. 71.5 today. */
+const SYNTHESIS_PROGRESS_END =
+  SYNTHESIS_PROGRESS_FLOOR + (100 - SYNTHESIS_PROGRESS_FLOOR) * SYNTHESIS_PROGRESS_SHARE;
+
+/**
+ * Top of the slice the composition renders are allowed to move the bar through.
+ *
+ * Deliberately a sliver. T0 measured the real dead zone as the ffmpeg encode —
+ * 264s of it against ~25s for a card and one ~48s bed per accent — so the
+ * honest thing this buys is "something is happening" during the two-ish
+ * minutes before ffmpeg starts, not a proportionate share of the wait. The
+ * remaining 25 points still belong to the encode, which reports nothing.
+ */
+const COMPOSITION_PROGRESS_CEILING = 75;
 
 // ---------------------------------------------------------------------------
 // Per-book concurrency gate (pure)
@@ -298,6 +316,11 @@ async function ensureSegmentCoverImage(
     burnBookTitle: Boolean(copy.bookTitle),
     burnChapterTitle: Boolean(copy.chapterTitle),
     sourceKind: uploaded ? "upload" : "blank",
+    // Identifies the cover's CONTENT, not merely that one exists. Without this
+    // a replaced cover keeps every key identical, the lookup below finds the
+    // overlay burned onto the previous artwork, and the segment re-renders with
+    // the old picture while reporting success.
+    coverFingerprint: coverFileFingerprint(uploaded),
     bookPosition: positions.book,
     chapterPosition: positions.chapter,
   });
@@ -316,8 +339,331 @@ async function ensureSegmentCoverImage(
     bookPosition: positions.book,
     chapterPosition: positions.chapter,
   });
-  await Bun.write(overlayPath, png);
+  // Temp-then-rename, because the path is a cache key. A crash or a kill partway
+  // through a direct write would leave a truncated PNG sitting at a *valid* key,
+  // and every later segment would happily reuse the corrupt file. rename() is
+  // atomic within a filesystem, so a reader sees either no file or a whole one.
+  const tempPath = `${overlayPath}.${crypto.randomUUID()}.tmp`;
+  try {
+    await Bun.write(tempPath, png);
+    await rename(tempPath, overlayPath);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
   return overlayPath;
+}
+
+// ---------------------------------------------------------------------------
+// Template compositions: the chapter card and the motion bed
+// ---------------------------------------------------------------------------
+
+/**
+ * The extra inputs a template contributes to a segment's single ffmpeg pass.
+ *
+ * Spread over the still options, so **an empty object has to mean "exactly
+ * today's encode"**. Every field is therefore added only when it is really in
+ * play: a key present with an `undefined` value would still be spread, and
+ * would still be a difference for anyone comparing argument lists.
+ */
+export interface SegmentTemplateAssets {
+  bedPath?: string;
+  cardPath?: string;
+  cardDuration?: number;
+  bedEncode?: BedEncodeProfile;
+  fps?: number;
+}
+
+export interface SegmentTemplateInput {
+  bookId: string;
+  bookTitle: string;
+  bookAuthor: string;
+  chapterTitle: string;
+  width: number;
+  height: number;
+  params: BookRenderParamsDocument;
+  signal?: AbortSignal;
+  /** Composition progress, 0..1, already coalesced by the renderer's throttle. */
+  onProgress?: (fraction: number) => void;
+  /** Degradation notices for the task log. Never a failure; always a reason. */
+  note?: (message: string) => void | Promise<void>;
+}
+
+/**
+ * Test seam for the composition renderer.
+ *
+ * Mirrors `__setTemplatesRootForTest`. Rendering a composition means Chrome,
+ * which no unit test can pay for, and the property worth asserting here is not
+ * the render — it is which output path each part is asked for, since that path
+ * *is* the cache key.
+ */
+let compositionRenderer: typeof renderComposition = renderComposition;
+
+export function __setCompositionRendererForTest(renderer?: typeof renderComposition): void {
+  compositionRenderer = renderer ?? renderComposition;
+}
+
+/**
+ * The accent a template is rendered with.
+ *
+ * A blank request is the documented way to ask for the template's own colour,
+ * so it is not a defect. Anything that is not a plain `#rrggbb` is: the value
+ * reaches a composition's CSS and this function's own cache key, and a typo
+ * that got that far would render a book in a colour nobody chose and then
+ * cache it under a key nobody can find. Lowercased so `#7AA2F7` and `#7aa2f7`
+ * are one cached bed rather than two.
+ */
+export function resolveTemplateAccent(template: TemplateManifest, requested?: string): string {
+  const wanted = String(requested ?? "").trim().toLowerCase();
+  if (!wanted) return template.defaultAccent;
+  if (!/^#[0-9a-f]{6}$/.test(wanted)) {
+    logger.warning(`ignoring accent ${JSON.stringify(requested)}: not a #rrggbb colour`);
+    return template.defaultAccent;
+  }
+  return wanted;
+}
+
+/**
+ * Stable filename for one cached composition render.
+ *
+ * The key is everything that changes the picture and nothing else. For the bed
+ * that is `(template, accent, size, fps)` — T0 removed the cover from the bed's
+ * design, so it does not vary per book at all and one render serves every
+ * segment; for the card it also carries the three strings the composition
+ * prints, chapter title included, because chapter 12 is a different picture
+ * from chapter 1.
+ *
+ * Hashed rather than spelled out because a chapter title is arbitrary text: it
+ * carries `/`, `:`, emoji and 200 characters of subtitle, none of which belong
+ * in a filename.
+ */
+export function compositionCacheName(part: TemplatePart, key: Record<string, unknown>): string {
+  const hasher = new Bun.CryptoHasher("sha1");
+  hasher.update(JSON.stringify(key));
+  return `${part}-${hasher.digest("hex").slice(0, 16)}.mp4`;
+}
+
+/** Says why a template part was dropped, in the log and on the task. */
+async function noteTemplateDegraded(input: SegmentTemplateInput, message: string): Promise<void> {
+  logger.warning(`book segment template: ${message}`);
+  await input.note?.(message);
+}
+
+/**
+ * Renders one part, or returns null having said why it could not.
+ *
+ * Null is a complete answer here: the caller drops that part and keeps the
+ * other one, and a segment with neither is the plain still it has always been.
+ * A cancellation is the single exception — it is the user, not a broken
+ * template, and degrading through it would spend an hour of ffmpeg on a
+ * segment nobody is waiting for.
+ */
+async function renderTemplatePart(
+  input: SegmentTemplateInput,
+  request: {
+    template: TemplateManifest;
+    part: TemplatePart;
+    outputFile: string;
+    variables: Record<string, string>;
+    fps: number;
+    onProgress?: (fraction: number) => void;
+  },
+): Promise<string | null> {
+  try {
+    // Nothing is written to `outputFile` until the bytes behind it are
+    // complete: renderComposition renders to a temp name beside it and renames.
+    // Without that a Chrome killed mid-frame would leave a truncated file at a
+    // valid cache key, and every later segment of the book would reuse it.
+    const result = await compositionRenderer({
+      templateDir: templatePartDir(request.template.id, request.part),
+      variables: request.variables,
+      outputFile: request.outputFile,
+      width: input.width,
+      height: input.height,
+      fps: request.fps,
+      signal: input.signal,
+      onProgress: request.onProgress,
+    });
+    return result.outputFile;
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    await noteTemplateDegraded(
+      input,
+      `the ${request.part} composition failed (${errorMessage(error)}); rendering without it`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Card and bed for one segment, or `{}` when none apply.
+ *
+ * **The body's t=0 stays the narration's t=0.** Both parts are extra *video*
+ * inputs to the one encode that already exists — the card an overlay bounded
+ * by `enable=`, the bed a `-stream_loop` replacing the held still — and
+ * neither touches the audio half of the graph. The SRT is written before this
+ * runs and its cues are narration-relative (`SubtitleCue.start` is "seconds
+ * from the start of the video", subtitle/srt.ts:11), so a card *prepended* as
+ * a clip would desynchronise every cue in the chapter. That is why it is an
+ * overlay.
+ *
+ * Total by construction: every failure below ends at a log line and a plain
+ * still. A book records `template_id` on `render_params`, and that record
+ * outlives the host — `tasks/recovery.ts` can resume a segment on a machine
+ * with no Chrome at all — so a missing template must never fail a chapter that
+ * took twenty minutes to narrate.
+ */
+export async function resolveSegmentTemplateAssets(
+  input: SegmentTemplateInput,
+): Promise<SegmentTemplateAssets> {
+  const templateId = String(input.params.template_id ?? "").trim();
+  const parts = input.params.template_parts ?? [];
+
+  // The path every book rendered before templates existed takes, and it must
+  // cost nothing at all: no availability probe, no disk read, and — because
+  // `{}` adds no keys to the still options — an ffmpeg argument list that is
+  // byte-identical to the one that shipped.
+  if (!templateId || parts.length === 0) return {};
+
+  const template = getTemplate(templateId);
+  if (!template) {
+    await noteTemplateDegraded(input, `template "${templateId}" is not installed; rendering the plain still`);
+    return {};
+  }
+
+  const wanted = parts.filter((part) => template.parts.includes(part));
+  for (const part of parts.filter((part) => !template.parts.includes(part))) {
+    await noteTemplateDegraded(input, `template "${templateId}" ships no ${part}; rendering without it`);
+  }
+  if (wanted.length === 0) return {};
+
+  // Probed here rather than only where a template is chosen, for the reason in
+  // the doc comment above: the choice is persisted and the capability is not.
+  if (!(await hyperframesAvailable())) {
+    await noteTemplateDegraded(
+      input,
+      "this host cannot render HyperFrames compositions; rendering the plain still",
+    );
+    return {};
+  }
+
+  try {
+    const accent = resolveTemplateAccent(template, input.params.template_accent);
+    // The template's own rate, for both parts. Rendering the card at the rate
+    // the body will be encoded at means no resample when it is overlaid.
+    const fps = template.bedEncode.fps;
+    // Under the book, so deleting a book reclaims its renders. The keys below
+    // carry no book identity, so two books on the same accent still each cost
+    // one bed — the sharing that matters is across a book's own segments.
+    const cacheDir = booksDir(join(input.bookId, "hyperframes"));
+
+    // Split so two parts do not each drive the bar from 0 to the ceiling.
+    const share = 1 / wanted.length;
+    let done = 0;
+    const partProgress = input.onProgress
+      ? (fraction: number) => input.onProgress?.(done * share + fraction * share)
+      : undefined;
+
+    const assets: SegmentTemplateAssets = {};
+
+    // Bed first: it is the part that is normally already on disk, so a book
+    // past its first segment reaches the card — the slow, per-chapter render —
+    // without waiting on anything.
+    if (wanted.includes("bed")) {
+      const bedPath = await renderTemplatePart(input, {
+        template,
+        part: "bed",
+        outputFile: join(
+          cacheDir,
+          compositionCacheName("bed", {
+            template: template.id,
+            accent,
+            width: input.width,
+            height: input.height,
+            fps,
+          }),
+        ),
+        variables: { accent },
+        fps,
+        onProgress: partProgress,
+      });
+      done += 1;
+      if (bedPath) {
+        assets.bedPath = bedPath;
+        // Without this the body would be encoded with codecQualityArgs()'
+        // still profile — `-preset medium -crf 23` over twelve thousand
+        // *moving* frames, which is the expensive half of what T0 measured.
+        assets.bedEncode = template.bedEncode;
+      }
+    }
+
+    if (wanted.includes("card")) {
+      const variables = {
+        bookTitle: input.bookTitle,
+        bookAuthor: input.bookAuthor,
+        chapterTitle: input.chapterTitle,
+        accent,
+      };
+      const cardPath = await renderTemplatePart(input, {
+        template,
+        part: "card",
+        outputFile: join(
+          cacheDir,
+          compositionCacheName("card", {
+            template: template.id,
+            ...variables,
+            width: input.width,
+            height: input.height,
+            fps,
+          }),
+        ),
+        variables,
+        fps,
+        onProgress: partProgress,
+      });
+      done += 1;
+      if (cardPath) {
+        assets.cardPath = cardPath;
+        // still.ts ignores a card with no window: `enable=` needs a span, and
+        // an unbounded overlay would hide the whole chapter behind a title.
+        assets.cardDuration = template.cardDuration;
+      }
+    }
+
+    // The one thing that is silent when it is wrong. The still options carry no
+    // `fps`, so a 15 fps bed dropped in without this is resampled to
+    // STILL_FRAMERATE — 5 fps — and ffmpeg reports nothing: the encode succeeds,
+    // the duration is right, and the motion is a strobe. The same decimation
+    // would step a card's 1.4s alpha fade down to seven frames, so the rate is
+    // raised for either part rather than only for the bed. On a card-only
+    // segment that is three times as many frames over a held still, which x264
+    // skips cheaply — estimated, not measured, at roughly +30% on T0's 96.5s
+    // still encode, against a title card that would otherwise look broken.
+    if (assets.bedPath || assets.cardPath) assets.fps = fps;
+
+    return assets;
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    await noteTemplateDegraded(input, `template assets could not be prepared (${errorMessage(error)})`);
+    return {};
+  }
+}
+
+/**
+ * The options one segment's encode runs with.
+ *
+ * Exists so the no-template case can be asserted field by field. `assets` is
+ * `{}` for every book that did not ask for a template, and spreading `{}` is
+ * how "identical to what shipped" is guaranteed rather than reviewed — the
+ * ffmpeg argument list is derived from exactly these fields, and still.ts's
+ * own single-invocation guarantee is only worth anything if the caller does
+ * not quietly hand it a different shape.
+ */
+export function buildSegmentStillOptions(
+  base: StillSegmentOptions,
+  assets: SegmentTemplateAssets,
+): StillSegmentOptions {
+  return { ...base, ...assets };
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +791,7 @@ export async function runSegmentRender(
 
     await writeSrtFile(subtitleFile, narration.cues);
     await updateTask(taskId, {
-      progress: SYNTHESIS_PROGRESS_FLOOR + (100 - SYNTHESIS_PROGRESS_FLOOR) * SYNTHESIS_PROGRESS_SHARE,
+      progress: SYNTHESIS_PROGRESS_END,
       audio_file: audioFile,
       audio_duration: narration.duration,
       subtitle_path: subtitleFile,
@@ -486,17 +832,47 @@ export async function runSegmentRender(
       : "";
     if (bgmPath) await appendTaskLog(taskId, `mixing background music: ${basename(bgmPath)}`);
 
-    const still = {
-      imagePath: coverPath,
-      audioPath: audioFile,
-      outputFile: renderTarget,
+    // Resolved after the narration, so a segment that fails to synthesise never
+    // pays for Chrome, and before the encode, because both parts are extra
+    // *inputs* to it. Nothing is added after the render: one ffmpeg invocation
+    // still produces the whole segment, which is the property still.ts exists
+    // to protect, and the narration is not moved by either of them.
+    const templateAssets = await resolveSegmentTemplateAssets({
+      bookId,
+      bookTitle: book.title,
+      bookAuthor: book.author,
+      chapterTitle: segment.title,
       width,
       height,
-      assPath,
-      fontsDir: assPath ? fontDir() : undefined,
-      threads: params.n_threads,
+      params,
       signal,
-    };
+      note: (message) => appendTaskLog(taskId, message),
+      onProgress: (fraction) => {
+        // Fire-and-forget: updateTask is a Mongo write and a render must not
+        // wait on it, nor die because it failed. Already coalesced to roughly
+        // one call a second by the renderer's own throttle, which is what
+        // keeps a 300-frame render from becoming 300 upserts.
+        void updateTask(taskId, {
+          progress:
+            SYNTHESIS_PROGRESS_END + fraction * (COMPOSITION_PROGRESS_CEILING - SYNTHESIS_PROGRESS_END),
+        }).catch(() => {});
+      },
+    });
+
+    const still = buildSegmentStillOptions(
+      {
+        imagePath: coverPath,
+        audioPath: audioFile,
+        outputFile: renderTarget,
+        width,
+        height,
+        assPath,
+        fontsDir: assPath ? fontDir() : undefined,
+        threads: params.n_threads,
+        signal,
+      },
+      templateAssets,
+    );
 
     try {
       await renderStillSegment({ ...still, bgmPath, bgmVolume: params.bgm_volume });

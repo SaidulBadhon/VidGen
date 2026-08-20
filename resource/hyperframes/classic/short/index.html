@@ -1,0 +1,193 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[
+    {"id":"bookTitle","type":"string","label":"Book title","default":"Me Before You"},
+    {"id":"chapterTitle","type":"string","label":"Chapter","default":"Chapter 1"},
+    {"id":"hookText","type":"string","label":"Hook","default":"There are 158 footsteps between the bus stop and home."},
+    {"id":"accent","type":"color","label":"Accent","default":"#7aa2f7"}
+  ]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <title>Classic — book short</title>
+    <!--
+      Vertical 9:16 picture for a book short. The narration, cues and BGM still
+      come from the existing pipeline via runPipeline({ stopAt: "subtitle" }) —
+      HyperFrames does no TTS, so this composition supplies the PICTURE ONLY and
+      is then handed to renderStillSegment as a bed. A short's composition is
+      exactly narration-length, so looping it is a no-op.
+
+      DURATION IS NOT A VARIABLE. Per the data-attribute contract, the root's
+      data-duration is read once at compile time, so a --variables value cannot
+      change render length. A short is exactly as long as its TTS, which varies
+      with script, voice and voice_rate. The renderer service must therefore
+      WRITE data-duration into a working copy of this file before rendering,
+      rather than passing it as a variable. The value below is only a sensible
+      default for preview.
+
+      hookText is deliberately the ONLY body copy. The full script is spoken,
+      not printed — captions carry the words, and a wall of text competing with
+      burned captions on a 9:16 frame is unreadable.
+
+      No <script>, no CDN, no cover image — same reasoning as the bed.
+    -->
+    <style>
+      body {
+        margin: 0;
+        background: #0b0d12;
+      }
+
+      #root {
+        position: relative;
+        width: 1080px;
+        height: 1920px;
+        overflow: hidden;
+      }
+
+      .fill {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 120% 60% at 50% -6%, color-mix(in srgb, var(--accent, #7aa2f7) 38%, transparent), transparent 62%),
+          radial-gradient(ellipse 100% 50% at 20% 106%, color-mix(in srgb, var(--accent, #7aa2f7) 22%, transparent), transparent 58%),
+          linear-gradient(172deg, #141b2b 0%, #0e131e 52%, #080b12 100%);
+      }
+
+      .glow-layer {
+        position: absolute;
+        inset: 0;
+      }
+
+      .glow {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        display: block;
+        width: 2200px;
+        height: 2200px;
+        margin: -1100px 0 0 -1100px;
+        border-radius: 50%;
+        mix-blend-mode: screen;
+        background: radial-gradient(
+          circle at 34% 38%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 70%, transparent) 0%,
+          transparent 38%
+        );
+        opacity: 0.55;
+        /* Linear full turn: seam-safe, and slow enough to read as drift. */
+        animation: short-spin 24s linear 1 both;
+      }
+
+      @keyframes short-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+
+      .vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 42%, rgba(0, 0, 0, 0.66) 100%);
+      }
+
+      /*
+        Everything sits in the UPPER two thirds. The lower third is left clear
+        on purpose — burned captions land there, and this is a captions-first
+        format.
+      */
+      .stack {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 200px;
+        padding: 0 96px;
+        box-sizing: border-box;
+        text-align: left;
+      }
+
+      .eyebrow {
+        margin: 0;
+        font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+        font-size: 30px;
+        font-weight: 600;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: var(--accent, #7aa2f7);
+        animation: short-rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.2s 1 both;
+      }
+
+      .book {
+        margin: 20px 0 0;
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: 82px;
+        font-weight: 700;
+        line-height: 1.08;
+        letter-spacing: -0.015em;
+        color: #f6f7fb;
+        text-shadow: 0 6px 30px rgba(0, 0, 0, 0.55);
+        animation: short-rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.34s 1 both;
+      }
+
+      .rule {
+        width: 140px;
+        height: 4px;
+        margin: 44px 0 0;
+        border-radius: 2px;
+        background: var(--accent, #7aa2f7);
+        transform-origin: 0 50%;
+        animation: short-rule 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.6s 1 both;
+      }
+
+      .hook {
+        margin: 44px 0 0;
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: 62px;
+        font-style: italic;
+        line-height: 1.3;
+        color: rgba(240, 244, 252, 0.9);
+        text-shadow: 0 4px 22px rgba(0, 0, 0, 0.5);
+        animation: short-rise 1s cubic-bezier(0.16, 1, 0.3, 1) 0.78s 1 both;
+      }
+
+      @keyframes short-rise {
+        0% { opacity: 0; transform: translateY(34px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes short-rule {
+        0% { opacity: 0; transform: scaleX(0); }
+        100% { opacity: 1; transform: scaleX(1); }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- CSS-only: declare the absent timeline rather than pay the producer's 45s poll. -->
+    <div
+      id="root"
+      data-composition-id="short"
+      data-start="0"
+      data-width="1080"
+      data-height="1920"
+      data-duration="24"
+      data-no-timeline
+    >
+      <div id="short-scene" class="clip" data-start="0" data-duration="24" data-track-index="0">
+        <div class="fill"></div>
+        <!-- Oversized glow overflows by design; scoped opt-out on a wrapper with no text. -->
+        <div class="glow-layer" data-layout-allow-overflow>
+          <div class="glow"></div>
+        </div>
+        <div class="vignette"></div>
+        <div class="stack">
+          <p class="eyebrow" data-var-text="chapterTitle">Chapter 1</p>
+          <h1 class="book" data-var-text="bookTitle">Me Before You</h1>
+          <div class="rule"></div>
+          <p class="hook" data-var-text="hookText">
+            There are 158 footsteps between the bus stop and home.
+          </p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

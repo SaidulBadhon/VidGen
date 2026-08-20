@@ -19,6 +19,7 @@
     "@napi-rs/canvas": "^0.1.60",
     "ai": "^5.0.0",
     "hono": "^4.6.0",
+    "hyperframes": "0.8.4",
     "kokoro-js": "^1.2.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.41.0",
     "mongodb": "^6.10.0",

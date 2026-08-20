@@ -1,0 +1,180 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[
+    {"id":"bookTitle","type":"string","label":"Book title","default":"A Tale Of Two Cities"},
+    {"id":"bookAuthor","type":"string","label":"Author","default":"Charles Dickens"},
+    {"id":"chapterTitle","type":"string","label":"Chapter","default":"Chapter 1"},
+    {"id":"accent","type":"color","label":"Accent","default":"#7aa2f7"}
+  ]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>Classic — chapter card</title>
+    <!--
+      Composited OVER the opening of the chapter body, not joined ahead of it.
+
+      Prepending this card as a separate clip was the original design and it is
+      broken three ways: the concat demuxer silently drops the narration audio
+      when the leading file has no audio track, a matched silent track still
+      produces DTS breaks at the seam, and shifting narration away from t=0
+      desynchronises every subtitle cue (they are written narration-relative,
+      starting at 00:00:00,000). Overlaying changes none of the timing, so none
+      of that applies.
+
+      The reveal is timed to the narration that ALREADY EXISTS. bookPipeline
+      prepends announcementLines to every segment, so the narrator says the book
+      title and then the chapter title over the first few seconds — measured on
+      a real segment: title 0.0-1.8s, chapter 1.8-3.5s. The stagger below lands
+      on those beats, so the card shows what is being spoken as it is spoken.
+      Getting this wrong is what makes a title card feel redundant.
+
+      NO COVER IMAGE. A VidGen cover is usually a generated typographic card
+      (renderDefaultCover: flat #14161c with the title and author set in the
+      subtitle font), so putting it here would print the same words twice. This
+      card supersedes that still rather than framing it.
+
+      No <script> and no CDN — see the bed for the full reasoning.
+    -->
+    <style>
+      body {
+        margin: 0;
+        background: #0b0d12;
+      }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+
+      /*
+        Deliberately the same field as the bed. The card is faded out by ffmpeg
+        to reveal the bed underneath, so if the two grounds match, the handoff
+        reads as the type leaving rather than as one shot cutting to another.
+      */
+      .fill {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 130% 90% at 50% -10%, color-mix(in srgb, var(--accent, #7aa2f7) 34%, transparent), transparent 68%),
+          radial-gradient(ellipse 90% 70% at 12% 108%, color-mix(in srgb, var(--accent, #7aa2f7) 20%, transparent), transparent 62%),
+          linear-gradient(168deg, #141b2b 0%, #0e131e 52%, #080b12 100%);
+      }
+
+      .vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 46%, rgba(0, 0, 0, 0.6) 100%);
+      }
+
+      .stack {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0;
+        padding: 0 200px;
+        box-sizing: border-box;
+        text-align: center;
+      }
+
+      /*
+        Named directly rather than relying on the renderer's aliasing. It maps
+        system families onto bundled faces for cross-platform consistency
+        ('georgia' -> EB Garamond, 'arial' -> Inter) and lint asks for the target
+        name so preview and render agree.
+
+        PACKAGING NOTE: the compiler FETCHES these from Google Fonts and caches
+        them under ~/.cache/hyperframes/fonts/. That is a network call at
+        compile time, so the Docker image has to warm this cache at build time
+        the same way it warms the Chrome download, or every render in a sealed
+        container either stalls or silently substitutes something else.
+      */
+      .book-title {
+        margin: 0;
+        font-family: "EB Garamond", Georgia, serif;
+        font-size: 108px;
+        line-height: 1.12;
+        font-weight: 700;
+        letter-spacing: -0.015em;
+        color: #f6f7fb;
+        text-shadow: 0 6px 34px rgba(0, 0, 0, 0.55);
+        animation: card-rise 1s cubic-bezier(0.16, 1, 0.3, 1) 0.25s 1 both;
+      }
+
+      .author {
+        margin: 26px 0 0;
+        font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+        font-size: 34px;
+        font-weight: 500;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: rgba(226, 232, 245, 0.62);
+        animation: card-rise 1s cubic-bezier(0.16, 1, 0.3, 1) 0.45s 1 both;
+      }
+
+      .rule {
+        width: 200px;
+        height: 3px;
+        margin: 52px 0 0;
+        border-radius: 2px;
+        background: linear-gradient(90deg, transparent, var(--accent, #7aa2f7), transparent);
+        transform-origin: 50% 50%;
+        animation: card-rule 0.9s cubic-bezier(0.16, 1, 0.3, 1) 1.35s 1 both;
+      }
+
+      /*
+        Lands at 1.6s, just as the narrator moves from the book title to the
+        chapter name.
+      */
+      .chapter {
+        margin: 48px 0 0;
+        font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+        font-size: 52px;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        color: var(--accent, #7aa2f7);
+        text-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+        animation: card-rise 1s cubic-bezier(0.16, 1, 0.3, 1) 1.6s 1 both;
+      }
+
+      @keyframes card-rise {
+        0% { opacity: 0; transform: translateY(38px); }
+        100% { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes card-rule {
+        0% { opacity: 0; transform: scaleX(0); }
+        100% { opacity: 1; transform: scaleX(1); }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- CSS-only: declare the absent timeline rather than pay the producer's 45s poll. -->
+    <div
+      id="root"
+      data-composition-id="card"
+      data-start="0"
+      data-width="1920"
+      data-height="1080"
+      data-duration="8"
+      data-no-timeline
+    >
+      <div id="card-scene" class="clip" data-start="0" data-duration="8" data-track-index="0">
+        <div class="fill"></div>
+        <div class="vignette"></div>
+        <div class="stack">
+          <h1 class="book-title" data-var-text="bookTitle">A Tale Of Two Cities</h1>
+          <p class="author" data-var-text="bookAuthor">Charles Dickens</p>
+          <div class="rule"></div>
+          <p class="chapter" data-var-text="chapterTitle">Chapter 1</p>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

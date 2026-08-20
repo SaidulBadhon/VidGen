@@ -12,15 +12,31 @@ import { Image as ImageIcon, Loader2, Play, RotateCw, Upload } from "lucide-reac
 import { api } from "../api/client.ts";
 import { BgmPreview, VoicePreview, useVoiceSampleTrigger } from "../components/AudioPreview.tsx";
 import { VoiceSelector } from "../components/voice-selector.tsx";
+import { Checkbox } from "../components/ui/checkbox";
 import { useI18n } from "../i18n/index.tsx";
-import { Alert, Badge, Button, Card, Field, NumberInput, Progress, Select, Slider, Switch, cn } from "../components/ui.tsx";
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  ColorInput,
+  Field,
+  NumberInput,
+  Progress,
+  Select,
+  Slider,
+  Switch,
+  cn,
+} from "../components/ui.tsx";
 import {
   ACCEPTED_COVER_EXTENSIONS,
   BOOK_BGM_TYPES,
+  BOOK_TEMPLATE_PARTS,
   COVER_TITLE_POSITIONS,
   SUBTITLE_RENDER_MODES,
   VIDEO_ASPECTS,
   bookApi,
+  bookTemplatesOf,
   errorText,
   formatDuration,
   isRenderConflict,
@@ -30,6 +46,8 @@ import {
   type BookLogLine,
   type BookRenderRequest,
   type BookSegmentState,
+  type BookTemplateMetadata,
+  type BookTemplatePart,
   type CoverTitlePosition,
   type SubtitleRenderMode,
 } from "./api.ts";
@@ -38,6 +56,8 @@ import { SegmentTitleEditor } from "./SegmentTitleEditor.tsx";
 
 /** Radix Select renders an empty value as a blank trigger, so "server default" needs a name. */
 const DEFAULT_FONT = "__default__";
+/** Same trick for "no template": the plain still is a real choice, not a blank row. */
+const DEFAULT_TEMPLATE = "__default__";
 
 const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   voice_name: DEFAULT_VOICE_NAME,
@@ -57,6 +77,12 @@ const DEFAULT_FORM: Required<Omit<BookRenderRequest, "segment_indexes">> = {
   burn_chapter_title: false,
   cover_book_title_position: "bottom",
   cover_chapter_title_position: "bottom",
+  // All three empty for the same reason `burn_book_title` is false: a book
+  // rendered before templates shipped and re-rendered after must come out
+  // identical. Empty is the documented ask for exactly today's static still.
+  template_id: "",
+  template_parts: [],
+  template_accent: "",
 };
 
 type RenderForm = typeof DEFAULT_FORM;
@@ -268,6 +294,110 @@ function CoverTitlePositionPicker({
   );
 }
 
+/**
+ * Motion-template controls: which template, which of its parts to apply, and an
+ * accent that overrides the one the template ships with.
+ *
+ * Renders nothing at all when the host offers no templates. That empty list is
+ * how a machine without Node and Chrome keeps this form behaving exactly as it
+ * did before templates existed — so the control has to disappear rather than
+ * offer a choice the renderer would then have to ignore.
+ */
+function TemplatePicker({
+  templates,
+  templateId,
+  parts,
+  accent,
+  onTemplateChange,
+  onPartsChange,
+  onAccentChange,
+}: {
+  templates: BookTemplateMetadata[];
+  templateId: string;
+  parts: BookTemplatePart[];
+  accent: string;
+  onTemplateChange: (template: BookTemplateMetadata | null) => void;
+  onPartsChange: (parts: BookTemplatePart[]) => void;
+  onAccentChange: (accent: string) => void;
+}) {
+  const { t } = useI18n();
+
+  // The dropdown entry is keyed `id`; the request field is `template_id`. The
+  // two names are different on purpose, and this is the seam between them.
+  const active = templates.find((template) => template.id === templateId) ?? null;
+  // Only the parts this template actually ships get a checkbox — a card-only
+  // template must not offer a bed there is nothing to render from.
+  const shipped = BOOK_TEMPLATE_PARTS.filter((part) => active?.parts.includes(part) ?? false);
+
+  if (templates.length === 0) return null;
+
+  return (
+    <>
+      <hr className="border-border" />
+
+      <Field label={t("Book Template")} hint={active?.description || t("Book Template Hint")}>
+        <Select
+          value={templateId || DEFAULT_TEMPLATE}
+          onValueChange={(value) =>
+            onTemplateChange(templates.find((template) => template.id === value) ?? null)
+          }
+          options={[
+            { value: DEFAULT_TEMPLATE, label: t("Book Template None") },
+            ...templates.map((template) => ({ value: template.id, label: template.label })),
+          ]}
+        />
+      </Field>
+
+      {/* A stored choice outlives the template it names — a rebuilt image may
+          simply not ship it any more. Say so, because the Select has no option
+          to match and would otherwise sit blank with no explanation. */}
+      {templateId !== "" && !active && (
+        <Alert tone="warning">{t("Book Template Missing", { id: templateId })}</Alert>
+      )}
+
+      {active && (
+        <>
+          <Field label={t("Book Template Parts")} hint={t("Book Template Parts Hint")}>
+            <div className="space-y-2">
+              {shipped.map((part) => (
+                <label key={part} className="flex cursor-pointer items-center gap-2.5 text-sm">
+                  <Checkbox
+                    checked={parts.includes(part)}
+                    onCheckedChange={(checked) =>
+                      // Rebuilt from `shipped` rather than spliced, which keeps
+                      // the canonical order, cannot duplicate, and drops any
+                      // part carried over from a template that had one.
+                      onPartsChange(
+                        shipped.filter((candidate) =>
+                          candidate === part ? checked === true : parts.includes(candidate),
+                        ),
+                      )
+                    }
+                  />
+                  {t(`Book Template Part ${part}`)}
+                </label>
+              ))}
+            </div>
+          </Field>
+
+          {/* Empty accent defers to the one the template ships, so the toggle
+              seeds a real colour to edit rather than starting from black. */}
+          <Switch
+            checked={accent !== ""}
+            onCheckedChange={(value) => onAccentChange(value ? active.default_accent : "")}
+            label={t("Book Template Accent")}
+          />
+          {accent === "" ? (
+            <p className="text-xs text-muted-foreground">{t("Book Template Accent Hint")}</p>
+          ) : (
+            <ColorInput value={accent} onChange={onAccentChange} />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 function storedCoverPosition(
   value: string | undefined,
   fallback?: string,
@@ -356,6 +486,13 @@ export function RenderPanel({
         stored.cover_chapter_title_position,
         stored.cover_title_position,
       ),
+      // Seeded straight from storage rather than validated against the
+      // metadata: the two queries settle independently, and a template list
+      // that has not arrived yet must not silently clear a stored choice.
+      // TemplatePicker reports an id the host no longer offers instead.
+      template_id: stored.template_id ?? "",
+      template_parts: stored.template_parts ?? [],
+      template_accent: stored.template_accent ?? "",
     });
     setTtsServer(inferTtsServerFromVoice(stored.voice_name));
   }, [bookId, storedKey, stored, settings.isSuccess, settings.data]);
@@ -379,6 +516,11 @@ export function RenderPanel({
     const body: BookRenderRequest = { ...form };
     // An empty font means "whatever the server defaults to"; sending "" would
     // be taken as a real font name and fail at the ASS writer.
+    //
+    // The template fields are deliberately *not* given the same treatment.
+    // There "" is the documented no-op the schema defaults to, so dropping it
+    // and sending it are the same request — and keeping it makes the body say
+    // out loud that this render wants the plain still.
     if (!body.font_name) delete body.font_name;
     return body;
   };
@@ -397,6 +539,22 @@ export function RenderPanel({
 
   const set = <K extends keyof RenderForm>(key: K, value: RenderForm[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
+
+  const templates = bookTemplatesOf(metadata.data);
+
+  // Switching templates keeps the ticks the new one can honour and drops the
+  // rest, and always returns the accent to "": every template ships its own
+  // default, so carrying one template's colour onto another would be inventing
+  // a choice nobody made.
+  const chooseTemplate = (template: BookTemplateMetadata | null) =>
+    setForm((current) => ({
+      ...current,
+      template_id: template?.id ?? "",
+      template_parts: template
+        ? current.template_parts.filter((part) => template.parts.includes(part))
+        : [],
+      template_accent: "",
+    }));
 
   const segments = detail?.segments ?? [];
   const totalDuration = segments.reduce((sum, segment) => sum + (segment.estimated_duration || 0), 0);
@@ -477,6 +635,16 @@ export function RenderPanel({
               </div>
             </div>
             <p className="text-xs text-muted-foreground">{t("Book Cover Burn Hint")}</p>
+
+            <TemplatePicker
+              templates={templates}
+              templateId={form.template_id}
+              parts={form.template_parts}
+              accent={form.template_accent}
+              onTemplateChange={chooseTemplate}
+              onPartsChange={(parts) => set("template_parts", parts)}
+              onAccentChange={(accent) => set("template_accent", accent)}
+            />
           </div>
         </Card>
 

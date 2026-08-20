@@ -25,6 +25,8 @@ import {
   videoParamsForBookRender,
   bookShortsPlanRequestSchema,
   bookShortsRenderRequestSchema,
+  shortsRenderParamsToDocument,
+  videoParamsForBookShort,
 } from "../src/models/bookSchema.ts";
 import {
   aggregateSegmentProgress,
@@ -51,7 +53,12 @@ import { detectImageFormat } from "../src/routes/v1/book.ts";
 import { DEFAULT_SEGMENT_OPTIONS } from "../src/services/book/types.ts";
 import type { Block, BookStructure } from "../src/services/book/types.ts";
 import { bookIsReadyForShorts } from "../src/services/book/shorts.ts";
-import type { BookBlockEditDocument, BookDecisionDocument, BookSegmentState } from "../src/db/types.ts";
+import type {
+  BookBlockEditDocument,
+  BookDecisionDocument,
+  BookRenderParamsDocument,
+  BookSegmentState,
+} from "../src/db/types.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -374,6 +381,78 @@ describe("bookRenderRequestSchema", () => {
     expect(() => bookRenderRequestSchema.parse({ ...base, bgm_type: "sonilo" })).toThrow();
     expect(() => bookRenderRequestSchema.parse({ ...base, bgm_type: "elevenlabs" })).toThrow();
     expect(() => bookRenderRequestSchema.parse({ ...base, bgm_volume: 4 })).toThrow();
+  });
+
+  test("defaults every template field to its no-op, like burn_book_title", () => {
+    // The rule the defaults exist for: a book rendered before templates shipped
+    // and re-rendered after must be handed an identical ffmpeg argument list.
+    // An omitted template field therefore has to mean "do exactly nothing",
+    // never "unset, pick something sensible".
+    const parsed = bookRenderRequestSchema.parse({ voice_name: "v" });
+    expect(parsed.template_id).toBe("");
+    expect(parsed.template_parts).toEqual([]);
+    expect(parsed.template_accent).toBe("");
+
+    const params = renderParamsToDocument(parsed);
+    expect(params.template_id).toBe("");
+    expect(params.template_parts).toEqual([]);
+    expect(params.template_accent).toBe("");
+  });
+
+  test("carries a chosen template, its parts and its accent through to the stored render params", () => {
+    const params = renderParamsToDocument(
+      bookRenderRequestSchema.parse({
+        voice_name: "v",
+        template_id: "classic",
+        // A bed without a card: the parts are picked independently because they
+        // cost different things, so one must survive without the other.
+        template_parts: ["bed"],
+        template_accent: "#B08D57",
+      }),
+    );
+    expect(params.template_id).toBe("classic");
+    expect(params.template_parts).toEqual(["bed"]);
+    expect(params.template_accent).toBe("#B08D57");
+
+    expect(() =>
+      bookRenderRequestSchema.parse({ voice_name: "v", template_parts: ["poster"] }),
+    ).toThrow();
+  });
+
+  test("renders a stored document that predates templates exactly as it did before", () => {
+    // The three fields are optional on the document for this row's sake: it was
+    // written before templates existed and must keep re-rendering as the plain
+    // still it was, so undefined has to behave as the same no-op as "".
+    const legacy: BookRenderParamsDocument = {
+      voice_name: "en-US-JennyNeural",
+      voice_rate: 1,
+      voice_volume: 1,
+      subtitle_render_mode: "soft",
+      video_aspect: "16:9",
+      font_name: "MicrosoftYaHeiBold.ttc",
+      font_size: 60,
+      text_fore_color: "#FFFFFF",
+      stroke_color: "#000000",
+      stroke_width: 1.5,
+      text_background_color: false,
+      rounded_subtitle_background: false,
+      subtitle_position: "bottom",
+      custom_position: 70,
+      n_threads: 2,
+    };
+    expect(legacy.template_id).toBeUndefined();
+    expect(legacy.template_parts).toBeUndefined();
+    expect(legacy.template_accent).toBeUndefined();
+
+    // Same document with the new defaults written in: the params the renderer
+    // is handed are identical, which is the whole point of the no-op values.
+    const withDefaults: BookRenderParamsDocument = {
+      ...legacy,
+      template_id: "",
+      template_parts: [],
+      template_accent: "",
+    };
+    expect(videoParamsForBookRender(withDefaults)).toEqual(videoParamsForBookRender(legacy));
   });
 });
 
@@ -879,6 +958,60 @@ describe("book shorts API schemas", () => {
     expect(shortDocId("book-1", 3)).toBe("book-1:3");
     expect(replaceBookSegments.toString()).not.toContain("deleteBookShorts");
     expect(replaceBookSegments.toString()).not.toContain("book_shorts");
+  });
+
+  test("short render params carry a template, defaulting to the stock-footage path", () => {
+    const parsed = bookShortsRenderRequestSchema.parse({ voice_name: "en-US-AriaNeural-Female" });
+    expect(parsed.template_id).toBe("");
+    expect(shortsRenderParamsToDocument(parsed).template_id).toBe("");
+
+    const chosen = bookShortsRenderRequestSchema.parse({
+      voice_name: "en-US-AriaNeural-Female",
+      template_id: "classic",
+    });
+    expect(shortsRenderParamsToDocument(chosen).template_id).toBe("classic");
+  });
+
+  test("short video params carry the hook and chapter title a template needs", () => {
+    // Both live on the short row and were dropped on the way to the renderer,
+    // which left a templated short with nothing to put on screen but the title.
+    const params = shortsRenderParamsToDocument(
+      bookShortsRenderRequestSchema.parse({
+        voice_name: "en-US-AriaNeural-Female",
+        template_id: "classic",
+      }),
+    );
+
+    const videoParams = videoParamsForBookShort({
+      title: "She said yes",
+      script: "A teaser from the ninth chapter.",
+      language: "en",
+      params,
+      hook: "He had already decided, and she was the last to know.",
+      chapter_title: "Chapter Nine",
+    });
+    expect(videoParams.video_subject).toBe("She said yes");
+    expect(videoParams.video_script).toBe("A teaser from the ninth chapter.");
+    expect(videoParams.hook).toBe("He had already decided, and she was the last to know.");
+    expect(videoParams.chapter_title).toBe("Chapter Nine");
+    expect(videoParams.template_id).toBe("classic");
+
+    // Omitted by a caller that predates them, and by any short row missing
+    // either: empty, not undefined, so a template reads "no hook line".
+    const bare = videoParamsForBookShort({
+      title: "She said yes",
+      script: "A teaser from the ninth chapter.",
+      language: "en",
+      params: shortsRenderParamsToDocument(
+        bookShortsRenderRequestSchema.parse({ voice_name: "en-US-AriaNeural-Female" }),
+      ),
+    });
+    expect(bare.hook).toBe("");
+    expect(bare.chapter_title).toBe("");
+    expect(bare.template_id).toBe("");
+    // The stock-footage vocabulary is untouched by the fields riding alongside.
+    expect(bare.video_aspect).toBe("9:16");
+    expect(bare.video_source).toBe("pexels");
   });
 
   test("planning is refused until the book has kept text", () => {

@@ -1,0 +1,236 @@
+<!doctype html>
+<html
+  lang="en"
+  data-composition-variables='[
+    {"id":"accent","type":"color","label":"Accent","default":"#7aa2f7"}
+  ]'
+>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <title>Classic — motion bed</title>
+    <!--
+      No GSAP, and no <script> of any kind, on purpose.
+
+      This composition renders inside the VidGen container with no network. The
+      scaffold's CDN <script> would be a fetch in the middle of a render and
+      would let a CDN change what a re-render produces. The CSS runtime adapter
+      seeks keyframes deterministically and is the documented fit for exactly
+      this: ambient background motion with a fixed duration.
+
+      NO COVER IMAGE, also on purpose.
+
+      The first draft of this bed used the book cover as a blurred wash. That
+      was wrong for this product. A VidGen "cover" is usually not artwork — when
+      no cover is uploaded, renderDefaultCover() generates a typographic card
+      (a flat #14161c field with the title and author set in the subtitle font),
+      and blurring type produces a smear of white blobs that reads as a bug
+      rather than a design. Verified against a real book: the smear was the
+      title.
+
+      So the bed is generated entirely from the accent colour. It looks the same
+      whether a book has photographic art, a generated title card, or no cover
+      at all — and its cache key collapses to (accent, aspect), which means one
+      bed per accent rather than one per book. The cover still appears, sharp
+      and deliberate, on the card.
+    -->
+    <style>
+      body {
+        margin: 0;
+        background: #0b0d12;
+      }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+      }
+
+      /*
+        Full-bleed child, never the root. The producer's frame compositing can
+        drop a background painted on the composition root itself — preview and
+        snapshot look correct and the rendered frame comes out black.
+      */
+      .fill {
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 130% 90% at 50% -10%, color-mix(in srgb, var(--accent, #7aa2f7) 34%, transparent), transparent 68%),
+          radial-gradient(ellipse 90% 70% at 12% 108%, color-mix(in srgb, var(--accent, #7aa2f7) 20%, transparent), transparent 62%),
+          linear-gradient(168deg, #141b2b 0%, #0e131e 52%, #080b12 100%);
+      }
+
+      /*
+        SEAM CONTRACT — ffmpeg loops this bed with -stream_loop -1, so the frame
+        at t=20 is butted straight against the frame at t=0, roughly 34 times in
+        an 11-minute chapter. Every animation below obeys two rules:
+
+          1. Its 0% and 100% states are identical.
+          2. Its timing function has matching velocity at both ends.
+
+        Rule 2 is the one that is easy to miss. A rotation that ends where it
+        started still jumps at the seam if it eases out: velocity falls to zero
+        at 100% and resumes at full speed at 0%. Every rotation here is
+        therefore linear. The one scale cycle is ease-in-out, which is seam-safe
+        the other way round — stationary at both ends, so the two sides match.
+
+        Full turns are used rather than partial sweeps precisely because
+        360deg is the only rotation that is guaranteed pixel-identical to 0deg.
+      */
+      .glow-layer {
+        position: absolute;
+        inset: 0;
+      }
+
+      .glow {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        display: block;
+        border-radius: 50%;
+        mix-blend-mode: screen;
+        will-change: transform;
+      }
+
+      /*
+        Each glow is a radial gradient whose bright lobe sits away from the
+        element's own centre, so rotating the element sweeps that lobe around
+        the frame. Three different sizes and two directions keep the sweep from
+        reading as a single spinning object.
+      */
+      .glow-a {
+        width: 2800px;
+        height: 2800px;
+        margin: -1400px 0 0 -1400px;
+        background: radial-gradient(
+          circle at 32% 36%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 78%, transparent) 0%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 24%, transparent) 22%,
+          transparent 40%
+        );
+        opacity: 0.62;
+        animation: bed-spin-cw 20s linear 1 both;
+      }
+
+      .glow-b {
+        width: 2400px;
+        height: 2400px;
+        margin: -1200px 0 0 -1200px;
+        background: radial-gradient(
+          circle at 70% 62%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 62%, transparent) 0%,
+          transparent 34%
+        );
+        opacity: 0.5;
+        animation: bed-spin-ccw 20s linear 1 both;
+      }
+
+      .glow-c {
+        width: 3400px;
+        height: 3400px;
+        margin: -1700px 0 0 -1700px;
+        background: radial-gradient(
+          circle at 58% 26%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 34%, transparent) 0%,
+          transparent 28%
+        );
+        opacity: 0.34;
+        animation: bed-spin-cw-slow 20s linear 1 both;
+      }
+
+      @keyframes bed-spin-cw {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+
+      @keyframes bed-spin-ccw {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(-360deg); }
+      }
+
+      /* One full turn as well — a slower-looking sweep needs a bigger element, not fewer degrees. */
+      @keyframes bed-spin-cw-slow {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+
+      /*
+        A wide diagonal sheen that swells and settles. Ease-in-out with matching
+        0%/100% keeps it seam-safe.
+      */
+      .sheen {
+        position: absolute;
+        inset: -20%;
+        background: linear-gradient(
+          118deg,
+          transparent 34%,
+          color-mix(in srgb, var(--accent, #7aa2f7) 26%, transparent) 50%,
+          transparent 66%
+        );
+        mix-blend-mode: screen;
+        animation: bed-sheen 20s ease-in-out 1 both;
+      }
+
+      @keyframes bed-sheen {
+        0% { opacity: 0.18; transform: scale(1); }
+        50% { opacity: 0.34; transform: scale(1.05); }
+        100% { opacity: 0.18; transform: scale(1); }
+      }
+
+      /*
+        Static overlays. These exist for legibility, not decoration: burned-in
+        captions sit over the lower third, and the narration is the product, so
+        the bed must never compete with the words.
+      */
+      .vignette {
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(ellipse at center, transparent 46%, rgba(0, 0, 0, 0.6) 100%);
+      }
+
+      .caption-scrim {
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(to bottom, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0) 34%, rgba(0, 0, 0, 0.52));
+      }
+    </style>
+  </head>
+  <body>
+    <!--
+      data-no-timeline is required, not cosmetic. With no window.__timelines
+      registration the producer polls for one for 45 seconds before rendering
+      anyway — 45 s added to every render, which across one book's cards is
+      close to an hour of pure waiting. This composition is CSS-only by design,
+      so it declares the absence instead of paying the poll.
+    -->
+    <div
+      id="root"
+      data-composition-id="bed"
+      data-start="0"
+      data-width="1920"
+      data-height="1080"
+      data-duration="20"
+      data-no-timeline
+    >
+      <!--
+        data-layout-allow-overflow: the glows are 2400-3400px elements inside a
+        1920px frame and are MEANT to extend past it — that overflow is what
+        lets their rotation sweep light across the frame instead of orbiting
+        inside it. Scoped to the glow wrapper only: it has no text and no
+        descendants, so this cannot mask a real clipping or contrast finding.
+      -->
+      <div id="bed-scene" class="clip" data-start="0" data-duration="20" data-track-index="0">
+        <div class="fill"></div>
+        <div class="glow-layer" data-layout-allow-overflow>
+          <div class="glow glow-c"></div>
+        <div class="glow glow-a"></div>
+        <div class="glow glow-b"></div>
+        </div>
+        <div class="sheen"></div>
+        <div class="vignette"></div>
+        <div class="caption-scrim"></div>
+      </div>
+    </div>
+  </body>
+</html>

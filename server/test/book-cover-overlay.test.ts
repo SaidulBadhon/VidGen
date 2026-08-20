@@ -6,7 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { mkdtempSync } from "node:fs";
 import {
+  coverFileFingerprint,
   coverOverlayCacheName,
   coverOverlayCopy,
   coverTitlePositionsFromParams,
@@ -86,12 +88,99 @@ describe("coverOverlayCacheName", () => {
     );
   });
 
+  /**
+   * Regression: replacing a book's cover must invalidate its burned overlays.
+   *
+   * The key used to carry only `sourceKind` — "is there an uploaded cover at
+   * all" — so swapping one upload for a different one produced an identical
+   * key. Every re-rendered segment then reused the overlay burned onto the OLD
+   * artwork, and the render looked successful.
+   */
+  test("does not reuse an overlay burned onto a different cover", () => {
+    expect(coverOverlayCacheName({ ...base, coverFingerprint: "1024:1700000000000" })).not.toBe(
+      coverOverlayCacheName({ ...base, coverFingerprint: "2048:1700000009999" }),
+    );
+  });
+
+  test("still reuses the overlay when the same cover is re-read", () => {
+    expect(coverOverlayCacheName({ ...base, coverFingerprint: "1024:1700000000000" })).toBe(
+      coverOverlayCacheName({ ...base, coverFingerprint: "1024:1700000000000" }),
+    );
+  });
+
+  test("a blank source ignores the fingerprint it has no cover for", () => {
+    const blank = { ...base, sourceKind: "blank" as const };
+    expect(coverOverlayCacheName({ ...blank, coverFingerprint: "" })).toBe(
+      coverOverlayCacheName(blank),
+    );
+  });
+
   test("does not reuse an overlay when only the chapter pad moves", () => {
     expect(
       coverOverlayCacheName({ ...base, bookPosition: "top", chapterPosition: "bottom" }),
     ).not.toBe(
       coverOverlayCacheName({ ...base, bookPosition: "top", chapterPosition: "top" }),
     );
+  });
+});
+
+describe("coverFileFingerprint", () => {
+  test("changes when the file's bytes change, and is stable when they do not", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cover-fp-"));
+    const file = join(dir, "cover.png");
+
+    await Bun.write(file, new Uint8Array([1, 2, 3, 4]));
+    const first = coverFileFingerprint(file);
+    expect(first).not.toBe("");
+    expect(coverFileFingerprint(file)).toBe(first);
+
+    // A replaced cover: different bytes at the very same path, which is exactly
+    // what POST /books/:id/cover produces when the format is unchanged.
+    await Bun.write(file, new Uint8Array([9, 9, 9, 9, 9, 9, 9, 9]));
+    expect(coverFileFingerprint(file)).not.toBe(first);
+  });
+
+  /**
+   * The filed bug, end to end through the two functions the pipeline composes.
+   *
+   * Sequence from the report: render a segment with a burned title, replace the
+   * cover with a visibly different image at the same path, re-render. Before the
+   * fix both renders produced the same overlay filename, so the second reused a
+   * PNG burned onto the first cover.
+   */
+  test("a replaced cover produces a different overlay filename for the same chapter", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cover-swap-"));
+    const cover = join(dir, "cover.png");
+    const keyFor = () =>
+      coverOverlayCacheName({
+        width: 1920,
+        height: 1080,
+        bookTitle: "A Quiet Harbour",
+        chapterTitle: "Chapter One",
+        burnBookTitle: true,
+        burnChapterTitle: true,
+        sourceKind: "upload" as const,
+        coverFingerprint: coverFileFingerprint(cover),
+      });
+
+    await Bun.write(cover, new Uint8Array([1, 2, 3, 4]));
+    const before = keyFor();
+
+    // Same path, different artwork — exactly what POST /books/:id/cover does
+    // when the replacement has the same detected format.
+    await Bun.write(cover, new Uint8Array(64).fill(7));
+    const after = keyFor();
+
+    expect(after).not.toBe(before);
+    // Nothing else moved, so the chapter is still identified the same way.
+    expect(before.startsWith("1920x1080-")).toBe(true);
+    expect(after.startsWith("1920x1080-")).toBe(true);
+  });
+
+  test("reads a missing or absent path as no cover rather than throwing", () => {
+    expect(coverFileFingerprint(join(tmpdir(), "definitely-not-here.png"))).toBe("");
+    expect(coverFileFingerprint(null)).toBe("");
+    expect(coverFileFingerprint(undefined)).toBe("");
   });
 });
 
