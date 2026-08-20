@@ -15,7 +15,29 @@ import {
   DEFAULT_SEGMENT_OPTIONS,
   type SegmentOptions,
 } from "../services/book/types.ts";
-import type { BookRenderParamsDocument, BookSegmentOptionsDocument } from "../db/types.ts";
+import type {
+  BookRenderParamsDocument,
+  BookSegmentOptionsDocument,
+  BookShortsRenderParamsDocument,
+} from "../db/types.ts";
+import {
+  DEFAULT_MAX_SHORTS,
+  DEFAULT_SHORT_DURATION_SECONDS,
+  DEFAULT_SHORT_OPTIONS,
+  MAX_MAX_SHORTS,
+  MAX_SHORT_DURATION_SECONDS,
+  MAX_SHORT_SCRIPT_LENGTH,
+  MIN_MAX_SHORTS,
+  MIN_SHORT_DURATION_SECONDS,
+  type ShortOptions,
+} from "../services/book/shorts.ts";
+import {
+  YOUTUBE_SHORT_DESCRIPTION_MAX,
+  YOUTUBE_SHORT_TAG_COUNT,
+  YOUTUBE_SHORT_TAG_MAX,
+  YOUTUBE_SHORT_TITLE_MAX,
+  normalizeYoutubeTags,
+} from "../services/llm/prompts.ts";
 
 // ---------------------------------------------------------------------------
 // Segmentation
@@ -133,9 +155,20 @@ export type BookPagination = z.infer<typeof bookPaginationSchema>;
  */
 export const bookTitleField = z.string().trim().min(1).max(300);
 
-export const bookPatchSchema = z.object({
-  title: bookTitleField,
-});
+/**
+ * Display name of the author. Empty is allowed so a reviewer can stop the first
+ * video announcing a bibliographic leftover such as "Moyes, Jojo".
+ */
+export const bookAuthorField = z.string().trim().max(300);
+
+export const bookPatchSchema = z
+  .object({
+    title: bookTitleField.optional(),
+    author: bookAuthorField.optional(),
+  })
+  .refine((body) => body.title !== undefined || body.author !== undefined, {
+    message: "title or author is required",
+  });
 export type BookPatchRequest = z.infer<typeof bookPatchSchema>;
 
 export const bookSegmentPatchSchema = z.object({
@@ -259,5 +292,122 @@ export function videoParamsForBookRender(params: BookRenderParamsDocument): Vide
     subtitle_position: params.subtitle_position,
     custom_position: params.custom_position,
     n_threads: params.n_threads,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Hook shorts
+// ---------------------------------------------------------------------------
+
+export const bookShortsPlanRequestSchema = z.object({
+  target_duration_seconds: z
+    .number()
+    .int()
+    .min(MIN_SHORT_DURATION_SECONDS)
+    .max(MAX_SHORT_DURATION_SECONDS)
+    .default(DEFAULT_SHORT_DURATION_SECONDS),
+  max_shorts: z.number().int().min(MIN_MAX_SHORTS).max(MAX_MAX_SHORTS).default(DEFAULT_MAX_SHORTS),
+  words_per_minute: z
+    .number()
+    .int()
+    .min(60)
+    .max(400)
+    .default(DEFAULT_SEGMENT_OPTIONS.wordsPerMinute),
+});
+export type BookShortsPlanRequest = z.infer<typeof bookShortsPlanRequestSchema>;
+
+export function shortsPlanToOptions(request: BookShortsPlanRequest): ShortOptions {
+  return {
+    targetDurationSeconds: request.target_duration_seconds,
+    maxShorts: request.max_shorts,
+    wordsPerMinute: request.words_per_minute,
+  };
+}
+
+export const bookShortPatchSchema = z
+  .object({
+    title: bookTitleField.optional(),
+    script: z.string().trim().min(1).max(MAX_SHORT_SCRIPT_LENGTH).optional(),
+    hook: z.string().trim().max(220).optional(),
+    youtube_title: z.string().trim().min(1).max(YOUTUBE_SHORT_TITLE_MAX).optional(),
+    description: z.string().trim().max(YOUTUBE_SHORT_DESCRIPTION_MAX).optional(),
+    tags: z
+      .array(z.string().trim().max(YOUTUBE_SHORT_TAG_MAX))
+      .max(YOUTUBE_SHORT_TAG_COUNT)
+      .transform((tags) => normalizeYoutubeTags(tags, YOUTUBE_SHORT_TAG_COUNT))
+      .optional(),
+  })
+  .refine(
+    (body) =>
+      body.title !== undefined ||
+      body.script !== undefined ||
+      body.hook !== undefined ||
+      body.youtube_title !== undefined ||
+      body.description !== undefined ||
+      body.tags !== undefined,
+    {
+      message: "title, script, hook, youtube_title, description or tags is required",
+    },
+  );
+export type BookShortPatchRequest = z.infer<typeof bookShortPatchSchema>;
+
+export const bookShortsRenderRequestSchema = z.object({
+  voice_name: z.string().min(1),
+  voice_rate: z.number().min(0.5).max(2).default(1),
+  voice_volume: z.number().min(0).max(5).default(1),
+  video_aspect: z.enum(["16:9", "9:16", "1:1"]).default("9:16"),
+  video_source: z.enum(["pexels", "pixabay", "coverr", "local"]).default("pexels"),
+  bgm_type: z.string().default("random"),
+  bgm_file: z.string().default(""),
+  bgm_volume: z.number().min(0).max(1).default(0.2),
+  font_name: videoParamsSchema.shape.font_name,
+  font_size: videoParamsSchema.shape.font_size,
+  n_threads: z.number().int().min(1).max(64).default(2),
+  indexes: z.array(z.number().int().min(0)).nullish(),
+});
+export type BookShortsRenderRequest = z.infer<typeof bookShortsRenderRequestSchema>;
+
+export function shortsRenderParamsToDocument(
+  request: BookShortsRenderRequest,
+): BookShortsRenderParamsDocument {
+  return {
+    voice_name: request.voice_name,
+    voice_rate: request.voice_rate,
+    voice_volume: request.voice_volume,
+    video_aspect: request.video_aspect,
+    video_source: request.video_source,
+    bgm_type: request.bgm_type,
+    bgm_file: request.bgm_file,
+    bgm_volume: request.bgm_volume,
+    font_name: request.font_name,
+    font_size: request.font_size,
+    n_threads: request.n_threads,
+  };
+}
+
+export function videoParamsForBookShort(options: {
+  title: string;
+  script: string;
+  language: string;
+  params: BookShortsRenderParamsDocument;
+}): VideoParams {
+  return videoParamsSchema.parse({
+    video_subject: options.title,
+    video_script: options.script,
+    video_aspect: options.params.video_aspect || "9:16",
+    video_source: options.params.video_source || "pexels",
+    match_materials_to_script: true,
+    video_concat_mode: "sequential",
+    video_language: options.language,
+    voice_name: options.params.voice_name,
+    voice_rate: options.params.voice_rate,
+    voice_volume: options.params.voice_volume,
+    bgm_type: options.params.bgm_type,
+    bgm_file: options.params.bgm_file,
+    bgm_volume: options.params.bgm_volume,
+    subtitle_enabled: true,
+    font_name: options.params.font_name,
+    font_size: options.params.font_size,
+    n_threads: options.params.n_threads,
   });
 }

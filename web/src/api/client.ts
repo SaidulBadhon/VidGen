@@ -104,6 +104,9 @@ export interface Task {
   warnings?: TaskWarning[] | null;
   cross_post_state?: string | null;
   cross_post_error?: string | null;
+  youtube_upload_state?: string | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_results?: YoutubeUploadResult[] | null;
   logs?: string[];
   created_at?: string;
   updated_at?: string;
@@ -113,6 +116,46 @@ export interface MediaFile {
   name: string;
   size: number;
   file: string;
+}
+
+export interface YoutubeUploadResult {
+  success: boolean;
+  channel_id: string;
+  channel_title: string;
+  video_id?: string;
+  video_url?: string;
+  error?: string;
+  playlist_id?: string;
+  playlist_error?: string;
+}
+
+export interface YoutubeChannel {
+  id: string;
+  channel_id: string;
+  title: string;
+  custom_url: string | null;
+  thumbnail_url: string | null;
+  google_account_email: string | null;
+  auto_upload: boolean;
+  playlist_access: boolean;
+  error: string | null;
+  created_at?: string;
+  updated_at?: string;
+  connected_at?: string;
+}
+
+export interface YoutubePlaylist {
+  id: string;
+  title: string;
+  item_count: number;
+}
+
+export interface YoutubeStatus {
+  configured: boolean;
+  redirect_uri: string;
+  redirect_uri_from_env: boolean;
+  channel_count: number;
+  privacy_status: "public" | "unlisted" | "private";
 }
 
 export interface ConnectionTestResult {
@@ -222,6 +265,59 @@ export const api = {
       `/cache/clear?scope=${scope}${maxAgeDays ? `&max_age_days=${maxAgeDays}` : ""}`,
       { method: "POST" },
     ),
+
+  youtubeStatus: (origin = window.location.origin) =>
+    request<YoutubeStatus>(`/youtube/status?origin=${encodeURIComponent(origin)}`),
+  listYoutubeChannels: () => request<{ channels: YoutubeChannel[] }>("/youtube/channels"),
+  listYoutubePlaylists: (channelId: string) =>
+    request<{ playlists: YoutubePlaylist[] }>(`/youtube/channels/${channelId}/playlists`),
+  createYoutubePlaylist: (
+    channelId: string,
+    body: { title: string; description?: string; privacy_status?: "public" | "unlisted" | "private" },
+  ) =>
+    request<{ playlist: YoutubePlaylist }>(`/youtube/channels/${channelId}/playlists`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  startYoutubeOAuth: (origin = window.location.origin) =>
+    request<{ url: string; redirect_uri: string }>(
+      `/youtube/oauth/start?origin=${encodeURIComponent(origin)}`,
+    ),
+  setYoutubeChannelAutoUpload: (id: string, auto_upload: boolean) =>
+    request<{ channels: YoutubeChannel[] }>(`/youtube/channels/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ auto_upload }),
+    }),
+  disconnectYoutubeChannel: (id: string) =>
+    request<{ id: string }>(`/youtube/channels/${id}`, { method: "DELETE" }),
+  uploadToYoutube: (body: {
+    source: "task" | "book_short" | "book_segment";
+    task_id?: string;
+    book_id?: string;
+    short_index?: number;
+    segment_index?: number;
+    video_index?: number;
+    channel_ids: string[];
+    title?: string;
+    description?: string;
+    tags?: string[];
+    privacy_status?: "public" | "unlisted" | "private";
+    playlist_ids?: Record<string, string>;
+    publish_at?: string;
+  }) => request<{ task_id?: string; book_id?: string; index?: number; channels: number }>(
+    "/youtube/uploads",
+    { method: "POST", body: JSON.stringify(body) },
+  ),
+  generateYoutubeListing: (body: {
+    source: "task" | "book_short" | "book_segment";
+    task_id?: string;
+    book_id?: string;
+    short_index?: number;
+    segment_index?: number;
+  }) => request<{ title: string; description: string; tags: string[] }>(
+    "/youtube/listing",
+    { method: "POST", body: JSON.stringify(body) },
+  ),
 };
 
 /**

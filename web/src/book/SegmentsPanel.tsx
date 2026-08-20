@@ -23,7 +23,9 @@ import {
   Save,
   Sparkles,
   Undo2,
+  Youtube,
 } from "lucide-react";
+import { api } from "../api/client.ts";
 import { useI18n } from "../i18n/index.tsx";
 import {
   Alert,
@@ -51,11 +53,20 @@ import {
   taskDownloadUrl,
   SEGMENT_MODES,
   type BookDetail,
+  type BookSegment,
   type BookSegmentState,
   type SegmentMode,
   type SegmentOptions,
 } from "./api.ts";
 import { SegmentTitleEditor } from "./SegmentTitleEditor.tsx";
+import {
+  YoutubeUploadDialog,
+  YoutubeUploadStatus,
+  youtubeListingIsStub,
+  youtubeUploadBusy,
+  youtubeAlreadyUploaded,
+  type YoutubeUploadDraft,
+} from "../components/YoutubeUploadDialog.tsx";
 
 function stateTone(state: BookSegmentState): "muted" | "success" | "warning" | "danger" | "accent" {
   if (state === "complete") return "success";
@@ -125,8 +136,53 @@ export function SegmentsPanel({
   // One row at a time: the editor fetches a segment's blocks, and a book with
   // 300 chapters left fully expanded would be 300 requests and a page of text.
   const [openIndex, setOpenIndex] = useState<number | null>(null);
+  const [youtubeDraft, setYoutubeDraft] = useState<YoutubeUploadDraft | null>(null);
 
   const segments = detail?.segments ?? [];
+  const listingRevision = detail?.book.revision ?? 0;
+  const [listingIndex, setListingIndex] = useState<number | null>(null);
+  const listingAttemptedRef = useRef<Set<string>>(new Set());
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
+
+  // Write AI listings in the background so Upload is just channels and a send.
+  useEffect(() => {
+    listingAttemptedRef.current = new Set();
+    let cancelled = false;
+    const pump = async () => {
+      while (!cancelled) {
+        const next = segmentsRef.current.find((segment) => {
+          const key = `${bookId}:${listingRevision}:${segment.index}`;
+          return youtubeListingIsStub(segment.description) && !listingAttemptedRef.current.has(key);
+        });
+        if (!next) {
+          if (!cancelled) setListingIndex(null);
+          return;
+        }
+        const key = `${bookId}:${listingRevision}:${next.index}`;
+        listingAttemptedRef.current.add(key);
+        setListingIndex(next.index);
+        try {
+          await api.generateYoutubeListing({
+            source: "book_segment",
+            book_id: bookId,
+            segment_index: next.index,
+          });
+          if (!cancelled) {
+            await queryClient.invalidateQueries({ queryKey: ["book", bookId] });
+          }
+        } catch {
+          // Keep the attempt so a failing model is not retried in a loop.
+        }
+      }
+    };
+    void pump();
+    return () => {
+      cancelled = true;
+    };
+  }, [bookId, listingRevision, queryClient]);
+
+  const listingNeeded = segments.filter((segment) => youtubeListingIsStub(segment.description)).length;
   const totalDuration = segments.reduce((sum, segment) => sum + (segment.estimated_duration || 0), 0);
   const problem = options ? validate(options) : "invalid";
   const dirty = Boolean(options) && JSON.stringify(options) !== serverKey;
@@ -248,7 +304,15 @@ export function SegmentsPanel({
         {segments.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted">{t("Book No Segments")}</p>
         ) : (
-          <div className="scroll-x">
+          <div className="space-y-3">
+            {listingIndex !== null && (
+              <p className="flex items-center gap-2 text-xs text-muted">
+                <Sparkles size={14} />
+                <Loader2 className="animate-spin" size={14} />
+                {t("Book Segment Listing Progress", { remaining: listingNeeded })}
+              </p>
+            )}
+            <div className="scroll-x">
             <table className="w-full min-w-[760px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-xs text-muted">
@@ -301,6 +365,17 @@ export function SegmentsPanel({
                             <span className="line-clamp-2">{segment.error}</span>
                           </div>
                         )}
+                        <YoutubeUploadStatus
+                          state={segment.youtube_upload_state}
+                          error={segment.youtube_upload_error}
+                          results={segment.youtube_upload_results}
+                        />
+                        {listingIndex === segment.index && (
+                          <div className="mt-1 flex items-center gap-1 text-xs text-muted">
+                            <Loader2 className="animate-spin" size={12} />
+                            {t("Book Segment Listing Generating")}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2.5 pr-3 align-middle tabular-nums text-muted">{segment.block_count}</td>
                       <td className="py-2.5 pr-3 align-middle tabular-nums whitespace-nowrap">
@@ -331,6 +406,32 @@ export function SegmentsPanel({
                                 <Download size={14} />
                                 {t("Download")}
                               </FileDownloadLink>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={
+                                  youtubeUploadBusy(segment.youtube_upload_state) ||
+                                  youtubeAlreadyUploaded(segment.youtube_upload_results)
+                                }
+                                title={
+                                  youtubeAlreadyUploaded(segment.youtube_upload_results)
+                                    ? t("YouTube Already Uploaded")
+                                    : t("YouTube Upload Title")
+                                }
+                                aria-label={t("YouTube Upload Title")}
+                                onClick={() =>
+                                  setYoutubeDraft(
+                                    youtubeDraftForSegment(bookId, detail?.book ?? { title: "", author: "" }, segment),
+                                  )
+                                }
+                              >
+                                {youtubeUploadBusy(segment.youtube_upload_state) ? (
+                                  <Loader2 className="animate-spin" size={14} />
+                                ) : (
+                                  <Youtube size={14} />
+                                )}
+                                {t("YouTube Upload Title")}
+                              </Button>
                             </>
                           )}
                           {segment.audio_url && (
@@ -394,6 +495,7 @@ export function SegmentsPanel({
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
@@ -409,6 +511,12 @@ export function SegmentsPanel({
           </div>
         )}
       </Card>
+
+      <YoutubeUploadDialog
+        open={Boolean(youtubeDraft)}
+        onOpenChange={(open) => !open && setYoutubeDraft(null)}
+        draft={youtubeDraft}
+      />
     </div>
   );
 }
@@ -573,6 +681,41 @@ function SegmentTextEditor({
       )}
     </div>
   );
+}
+
+const YOUTUBE_TITLE_MAX = 100;
+
+function withEpisodeSuffix(title: string, episode: number): string {
+  const suffix = ` | Episode ${episode}`;
+  const trimmed = title.replace(/\s*[\u2014\u2013]\s*/g, " - ").replace(/\s+/g, " ").trim();
+  if (!trimmed) return `Episode ${episode}`.slice(0, YOUTUBE_TITLE_MAX);
+  if (/(?:^|\s)\|\s*Episode\s+\d+\s*$/i.test(trimmed)) return trimmed.slice(0, YOUTUBE_TITLE_MAX);
+  const room = YOUTUBE_TITLE_MAX - suffix.length;
+  const head = trimmed.length <= room ? trimmed : `${trimmed.slice(0, Math.max(1, room - 1)).trimEnd()}…`;
+  return `${head}${suffix}`;
+}
+
+function youtubeDraftForSegment(
+  bookId: string,
+  book: { title: string; author: string },
+  segment: BookSegment,
+): YoutubeUploadDraft {
+  const fallbackTitle = [book.title.trim(), segment.title.trim()].filter(Boolean).join(" - ");
+  const credit = book.author.trim()
+    ? `"${book.title.trim()}" by ${book.author.trim()}`
+    : `"${book.title.trim() || segment.title}"`;
+  return {
+    source: "book_segment",
+    bookId,
+    segmentIndex: segment.index,
+    title: withEpisodeSuffix(segment.youtube_title || fallbackTitle || segment.title, segment.index + 1),
+    description:
+      segment.description ||
+      [segment.title, "", `From ${credit}.`, "", "#audiobook #books"].join("\n"),
+    tags: segment.tags?.length
+      ? segment.tags
+      : [book.title, book.author, "audiobook", "books"].map((tag) => tag.trim()).filter(Boolean),
+  };
 }
 
 function FileDownloadLink({

@@ -22,6 +22,7 @@ import { mediaRouter } from "./routes/v1/media.ts";
 import { pingRouter } from "./routes/v1/ping.ts";
 import { settingsRouter } from "./routes/v1/settings.ts";
 import { videoRouter } from "./routes/v1/video.ts";
+import { youtubeRouter } from "./routes/v1/youtube.ts";
 import { logger } from "./utils/logger.ts";
 import { getResponse } from "./utils/misc.ts";
 import { APP_VERSION, PROJECT_NAME } from "./version.ts";
@@ -65,6 +66,7 @@ app.route("/api/v1", llmRouter);
 app.route("/api/v1", mediaRouter);
 app.route("/api/v1", videoRouter);
 app.route("/api/v1", bookRouter);
+app.route("/api/v1", youtubeRouter);
 
 // Generated media: final videos, narration audio, subtitles, script.json.
 app.get("/tasks/*", (c) => serveTaskFile(c, c.req.path.replace(/^\/tasks\/?/, "")));

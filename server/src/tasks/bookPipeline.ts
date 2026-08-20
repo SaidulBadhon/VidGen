@@ -43,6 +43,7 @@ import {
   wantsCoverTitleBurn,
 } from "../services/book/coverOverlay.ts";
 import { keptBlocks } from "../services/book/filter/decisions.ts";
+import { writeBookSegmentListing, youtubeListingIsStub } from "../services/book/publish.ts";
 import { announcementLines, planBookSegments } from "../services/book/smartSegment.ts";
 import type { Block, BookStructure, FilterDecision, SegmentOptions } from "../services/book/types.ts";
 import { assRenderOptionsFromParams, writeAssFile } from "../services/subtitle/ass.ts";
@@ -57,6 +58,7 @@ import { booksDir, bookSegmentDir, bookSegmentFileStem, fontDir } from "../utils
 import { PROCESS_OWNER_ID } from "./owner.ts";
 import { taskQueue } from "./queue.ts";
 import { appendTaskLog, createTask, updateTask } from "./state.ts";
+import { scheduleAutoYoutubeUploadForSegment } from "./youtubeUpload.ts";
 
 /**
  * Segments of one book that may render at once.
@@ -217,8 +219,8 @@ export function segmentBlocks(
  *
  * A blank line between blocks is not cosmetic: it is the boundary the long-form
  * chunker splits on first, so paragraphs stay whole across synthesis requests.
- * `leadIn` is announced before the body when the book, author, or chapter name
- * is not already the first lines of the segment.
+ * `leadIn` is announced before the body — book title, then chapter name — when
+ * those lines are not already at the start of the segment.
  */
 export function segmentNarrationText(blocks: readonly Block[], leadIn: readonly string[] = []): string {
   const body = blocks
@@ -396,6 +398,24 @@ export async function runSegmentRender(
     );
     if (!text) throw new Error("every block in this segment was filtered out, so there is nothing to narrate");
 
+    // Listing copy is independent of the encode and usually finishes during
+    // narration, so Upload does not have to wait on the model afterwards.
+    const listingPromise = youtubeListingIsStub(segment.description)
+      ? writeBookSegmentListing({
+          bookId,
+          index,
+          expectedRevision: context.revision,
+        })
+          .then((wrote) => {
+            if (wrote) return appendTaskLog(taskId, "wrote YouTube listing");
+          })
+          .catch((error) => {
+            logger.warning(
+              `book segment listing failed, book_id: ${bookId}, index: ${index}: ${errorMessage(error)}`,
+            );
+          })
+      : Promise.resolve();
+
     const directory = bookSegmentDir(book.title, bookId, index, segment.title);
     const stem = bookSegmentFileStem(segment.title, index);
     const audioFile = join(directory, `${stem}.mp3`);
@@ -513,6 +533,8 @@ export async function runSegmentRender(
       return;
     }
 
+    await listingPromise;
+
     await patchBookSegment(bookId, index, {
       state: "complete",
       audio_path: audioFile,
@@ -530,6 +552,10 @@ export async function runSegmentRender(
     await syncBookState(bookId);
 
     logger.success(`book segment complete, book_id: ${bookId}, index: ${index}, duration: ${narration.duration.toFixed(1)}s`);
+
+    void scheduleAutoYoutubeUploadForSegment({ bookId, index, videoPath: videoFile }).catch((error) => {
+      logger.warning(`YouTube auto-upload skipped for segment ${bookId}/${index}: ${errorMessage(error)}`);
+    });
   } catch (error) {
     await failSegment(context, errorMessage(error)).catch((failure) => {
       logger.error(`failed to record book segment failure: ${errorMessage(failure)}`);

@@ -1,4 +1,4 @@
-import { AudioLines, Database, HardDrive, SlidersHorizontal, Sparkles, type LucideIcon } from "lucide-react";
+import { AudioLines, Database, HardDrive, SlidersHorizontal, Sparkles, Youtube, type LucideIcon } from "lucide-react";
 
 export const SETTINGS_SECTIONS = [
   {
@@ -24,6 +24,14 @@ export const SETTINGS_SECTIONS = [
     descriptionKey: "Settings Materials Description",
     icon: Database,
     iconClass: "bg-teal-600 text-white",
+  },
+  {
+    id: "youtube",
+    path: "/settings/youtube",
+    titleKey: "YouTube Settings Tab",
+    descriptionKey: "Settings Youtube Description",
+    icon: Youtube,
+    iconClass: "bg-red-600 text-white",
   },
   {
     id: "cache",

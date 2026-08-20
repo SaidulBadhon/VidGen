@@ -62,6 +62,9 @@ const ENV_BINDINGS: readonly EnvBinding[] = [
     envVars: ["TWELVELABS_API_KEYS", "TWELVELABS_API_KEY"],
     list: true,
   },
+
+  { section: "app", key: "google_client_id", envVars: ["GOOGLE_CLIENT_ID"] },
+  { section: "app", key: "google_client_secret", envVars: ["GOOGLE_CLIENT_SECRET"] },
 ];
 
 /** The bound value from the environment, or undefined when nothing is set. */

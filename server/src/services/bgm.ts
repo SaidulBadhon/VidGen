@@ -228,7 +228,7 @@ export function listBgmFiles(): string[] {
  * Resolves a requested track inside the two allowed directories.
  *
  * A bare filename hits the upload directory first, while absolute allow-listed
- * paths and legacy forms like `./resource/songs/output000.mp3` keep working.
+ * paths and legacy forms like `./resource/songs/lfm-aeroplane.mp3` keep working.
  */
 export function resolveBgmFile(unsafePath: string): string {
   if (!unsafePath || !(SUPPORTED_BGM_EXTENSIONS as readonly string[]).includes(extname(unsafePath).toLowerCase())) {

@@ -23,6 +23,8 @@ import {
   segmentOptionsFromDocument,
   segmentOptionsToDocument,
   videoParamsForBookRender,
+  bookShortsPlanRequestSchema,
+  bookShortsRenderRequestSchema,
 } from "../src/models/bookSchema.ts";
 import {
   aggregateSegmentProgress,
@@ -33,7 +35,9 @@ import {
   parseDecisionDocId,
   parseSegmentDocId,
   resolveBookDecisions,
+  replaceBookSegments,
   segmentDocId,
+  shortDocId,
 } from "../src/db/books.ts";
 import {
   BookConcurrencyGate,
@@ -46,6 +50,7 @@ import { shouldUseBgm } from "../src/services/bgm.ts";
 import { detectImageFormat } from "../src/routes/v1/book.ts";
 import { DEFAULT_SEGMENT_OPTIONS } from "../src/services/book/types.ts";
 import type { Block, BookStructure } from "../src/services/book/types.ts";
+import { bookIsReadyForShorts } from "../src/services/book/shorts.ts";
 import type { BookBlockEditDocument, BookDecisionDocument, BookSegmentState } from "../src/db/types.ts";
 
 // ---------------------------------------------------------------------------
@@ -239,6 +244,15 @@ describe("bookPatchSchema", () => {
 
   test("rejects a title past the cap", () => {
     expect(() => bookPatchSchema.parse({ title: "x".repeat(301) })).toThrow();
+  });
+
+  test("accepts an author on its own, including a blank to clear it", () => {
+    expect(bookPatchSchema.parse({ author: "  Jojo Moyes  " })).toEqual({ author: "Jojo Moyes" });
+    expect(bookPatchSchema.parse({ author: "   " })).toEqual({ author: "" });
+  });
+
+  test("rejects an author past the cap", () => {
+    expect(() => bookPatchSchema.parse({ author: "x".repeat(301) })).toThrow();
   });
 
   test("uses the same title rules for a segment rename", () => {
@@ -643,6 +657,14 @@ describe("segment narration", () => {
     );
   });
 
+  test("later segments still open with the book title then the chapter name", () => {
+    const structure = smallBook();
+    const blocks = segmentBlocks(structure, resolveBookDecisions(structure, []), ["0:2"]);
+    expect(segmentNarrationText(blocks, ["A Quiet Harbour", "Chapter One"])).toBe(
+      "A Quiet Harbour\n\nChapter One\n\nThe harbour was quiet that morning.",
+    );
+  });
+
   test("returns empty text when every block was filtered out", () => {
     const structure = smallBook();
     const decisions = resolveBookDecisions(structure, []);
@@ -832,5 +854,40 @@ describe("detectImageFormat", () => {
   test("rejects a truncated header rather than reading past the end", () => {
     expect(detectImageFormat(new Uint8Array([0x89, 0x50]))).toBeNull();
     expect(detectImageFormat(new TextEncoder().encode("RIFF1234"))).toBeNull();
+  });
+});
+
+describe("book shorts API schemas", () => {
+  test("plan defaults to a 60s cap of 12 teasers", () => {
+    const parsed = bookShortsPlanRequestSchema.parse({});
+    expect(parsed.target_duration_seconds).toBe(60);
+    expect(parsed.max_shorts).toBe(12);
+  });
+
+  test("render requires a voice and defaults to 9:16 stock footage", () => {
+    expect(() => bookShortsRenderRequestSchema.parse({})).toThrow();
+    const parsed = bookShortsRenderRequestSchema.parse({ voice_name: "en-US-AriaNeural-Female" });
+    expect(parsed.video_aspect).toBe("9:16");
+    expect(parsed.video_source).toBe("pexels");
+  });
+
+  test("short rows share the composite id shape with segments but a different collection", () => {
+    // Re-planning audiobook chapters calls replaceBookSegments, which only
+    // writes book_segments. A short at the same index is a different _id
+    // collection, so the teaser scripts survive.
+    expect(shortDocId("book-1", 3)).toBe(segmentDocId("book-1", 3));
+    expect(shortDocId("book-1", 3)).toBe("book-1:3");
+    expect(replaceBookSegments.toString()).not.toContain("deleteBookShorts");
+    expect(replaceBookSegments.toString()).not.toContain("book_shorts");
+  });
+
+  test("planning is refused until the book has kept text", () => {
+    expect(bookIsReadyForShorts("extracting")).toBe(false);
+    expect(bookIsReadyForShorts("ocr")).toBe(false);
+    expect(bookIsReadyForShorts("ocr_pending")).toBe(false);
+    expect(bookIsReadyForShorts("failed")).toBe(false);
+    expect(bookIsReadyForShorts("ready")).toBe(true);
+    expect(bookIsReadyForShorts("rendering")).toBe(true);
+    expect(bookIsReadyForShorts("complete")).toBe(true);
   });
 });

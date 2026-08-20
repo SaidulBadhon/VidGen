@@ -40,6 +40,9 @@ services:
       PIXABAY_API_KEYS: ${PIXABAY_API_KEYS:-${PIXABAY_API_KEY:-}}
       COVERR_API_KEYS: ${COVERR_API_KEYS:-${COVERR_API_KEY:-}}
       TWELVELABS_API_KEYS: ${TWELVELABS_API_KEYS:-${TWELVELABS_API_KEY:-}}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
     volumes:
       # Generated videos, downloaded materials, uploaded BGM and local clips.
       - ./storage:/app/storage

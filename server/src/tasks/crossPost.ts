@@ -18,9 +18,11 @@ import { sleep } from "../utils/misc.ts";
 import * as llm from "../services/llm/index.ts";
 import * as uploadPost from "../services/uploadPost.ts";
 import type { CrossPostResult } from "../db/types.ts";
+import { getBook, getBookShort, patchBookShort } from "../db/books.ts";
+import { parseBookShortRequestId } from "../services/book/shorts.ts";
 import { BoundedPool } from "./queue.ts";
 import { PROCESS_OWNER_ID } from "./owner.ts";
-import { patchTask } from "./state.ts";
+import { getTask, patchTask } from "./state.ts";
 
 const STATE_WRITE_ATTEMPTS = 3;
 const STATE_RETRY_DELAY_MS = 100;
@@ -79,6 +81,77 @@ export interface CrossPostJob {
   youtubePrivacyStatus: string;
 }
 
+async function youtubeExtraForJob(job: CrossPostJob): Promise<uploadPost.YoutubeExtra> {
+  const stored = await loadBookShortPublishMetadata(job.taskId);
+  if (stored) {
+    return {
+      youtube_title: stored.youtubeTitle || job.videoSubject,
+      youtube_description: stored.description,
+      tags: stored.tags,
+      privacyStatus: job.youtubePrivacyStatus,
+      containsSyntheticMedia: true,
+    };
+  }
+
+  const metadata = await llm.generateSocialMetadata({
+    videoSubject: job.videoSubject,
+    videoScript: job.videoScript,
+    language: job.videoLanguage,
+    platform: "youtube_shorts",
+  });
+  return {
+    youtube_title: metadata.title || job.videoSubject,
+    youtube_description: metadata.caption,
+    tags: metadata.hashtags,
+    privacyStatus: job.youtubePrivacyStatus,
+    containsSyntheticMedia: true,
+  };
+}
+
+/**
+ * Book shorts persist their YouTube listing on the row. Reuse it at upload so
+ * a reviewer can edit the copy before render, and so we do not ask the model
+ * twice. Older rows that predate the fields get a listing generated once and
+ * written back.
+ */
+async function loadBookShortPublishMetadata(taskId: string): Promise<{
+  youtubeTitle: string;
+  description: string;
+  tags: string[];
+} | null> {
+  const task = await getTask(taskId).catch(() => null);
+  const parsed = parseBookShortRequestId(task?.request_id);
+  if (!parsed) return null;
+
+  const short = await getBookShort(parsed.bookId, parsed.index).catch(() => null);
+  if (!short) return null;
+
+  if (short.youtube_title?.trim() || short.description?.trim()) {
+    return {
+      youtubeTitle: short.youtube_title || short.title,
+      description: short.description || "",
+      tags: short.tags ?? [],
+    };
+  }
+
+  const book = await getBook(parsed.bookId).catch(() => null);
+  const generated = await llm.generateBookShortPublishMetadata({
+    bookTitle: book?.title || "",
+    author: book?.author || "",
+    language: book?.language,
+    chapterTitle: short.chapter_title,
+    title: short.title,
+    hook: short.hook,
+    script: short.script,
+  });
+  await patchBookShort(parsed.bookId, parsed.index, {
+    youtube_title: generated.youtubeTitle,
+    description: generated.description,
+    tags: generated.tags,
+  }).catch(() => {});
+  return generated;
+}
+
 async function runCrossPost(job: CrossPostJob): Promise<void> {
   const results: CrossPostResult[] = [];
 
@@ -105,19 +178,7 @@ async function runCrossPost(job: CrossPostJob): Promise<void> {
 
     let youtubeExtra: uploadPost.YoutubeExtra | undefined;
     if (job.platforms.some((platform) => platform.startsWith("youtube"))) {
-      const metadata = await llm.generateSocialMetadata({
-        videoSubject: job.videoSubject,
-        videoScript: job.videoScript,
-        language: job.videoLanguage,
-        platform: "youtube_shorts",
-      });
-      youtubeExtra = {
-        youtube_title: metadata.title || job.videoSubject,
-        youtube_description: metadata.caption,
-        tags: metadata.hashtags,
-        privacyStatus: job.youtubePrivacyStatus,
-        containsSyntheticMedia: true,
-      };
+      youtubeExtra = await youtubeExtraForJob(job);
     }
 
     for (const videoPath of job.videoPaths) {

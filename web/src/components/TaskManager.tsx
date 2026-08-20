@@ -5,10 +5,11 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Download, Loader2, Play, RotateCcw, Trash2, XCircle } from "lucide-react";
+import { Download, Loader2, Play, RotateCcw, Trash2, XCircle, Youtube } from "lucide-react";
 import { api, type Task } from "../api/client.ts";
 import { useI18n } from "../i18n/index.tsx";
 import { Badge, Button, Card, Dialog, Progress, Select } from "./ui.tsx";
+import { YoutubeUploadDialog, YoutubeUploadStatus, youtubeAlreadyUploaded, youtubeUploadBusy, type YoutubeUploadDraft } from "./YoutubeUploadDialog.tsx";
 import {
   Table,
   TableBody,
@@ -46,13 +47,21 @@ export function TaskManager({ onRestoreParams }: { onRestoreParams?: (params: Re
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<StatusFilter>("all");
   const [preview, setPreview] = useState<Task | null>(null);
+  const [youtubeDraft, setYoutubeDraft] = useState<YoutubeUploadDraft | null>(null);
 
   const tasksQuery = useQuery({
     queryKey: ["tasks"],
     queryFn: () => api.listTasks(1, 50),
     // Any task still running needs the list to keep moving.
     refetchInterval: (query) =>
-      query.state.data?.tasks.some((task) => task.state === TASK_STATE_PROCESSING) ? 3000 : false,
+      query.state.data?.tasks.some(
+        (task) =>
+          task.state === TASK_STATE_PROCESSING ||
+          task.youtube_upload_state === "pending" ||
+          task.youtube_upload_state === "processing",
+      )
+        ? 3000
+        : false,
   });
 
   const remove = useMutation({
@@ -140,6 +149,11 @@ export function TaskManager({ onRestoreParams }: { onRestoreParams?: (params: Re
                   <TableCell title={subject}>
                     {truncate(subject)}
                     {task.error && <div className="text-xs text-destructive">{truncate(task.error, 60)}</div>}
+                    <YoutubeUploadStatus
+                      state={task.youtube_upload_state}
+                      error={task.youtube_upload_error}
+                      results={task.youtube_upload_results}
+                    />
                   </TableCell>
                   <TableCell className="w-28">
                     <Progress value={task.progress} />
@@ -157,6 +171,36 @@ export function TaskManager({ onRestoreParams }: { onRestoreParams?: (params: Re
                               <Download size={14} />
                             </Button>
                           </a>
+                          {status === "complete" && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              title={
+                                youtubeAlreadyUploaded(task.youtube_upload_results)
+                                  ? t("YouTube Already Uploaded")
+                                  : t("YouTube Upload Title")
+                              }
+                              disabled={
+                                youtubeUploadBusy(task.youtube_upload_state) ||
+                                youtubeAlreadyUploaded(task.youtube_upload_results)
+                              }
+                              onClick={() =>
+                                setYoutubeDraft({
+                                  source: "task",
+                                  taskId: task.task_id,
+                                  title: String(task.params?.video_subject ?? "Untitled video"),
+                                  description: String(task.script ?? ""),
+                                  tags: [],
+                                })
+                              }
+                            >
+                              {youtubeUploadBusy(task.youtube_upload_state) ? (
+                                <Loader2 className="animate-spin" size={14} />
+                              ) : (
+                                <Youtube size={14} />
+                              )}
+                            </Button>
+                          )}
                         </>
                       )}
                       {task.params && onRestoreParams && (
@@ -222,6 +266,12 @@ export function TaskManager({ onRestoreParams }: { onRestoreParams?: (params: Re
           </div>
         </Dialog>
       )}
+
+      <YoutubeUploadDialog
+        open={Boolean(youtubeDraft)}
+        onOpenChange={(open) => !open && setYoutubeDraft(null)}
+        draft={youtubeDraft}
+      />
     </Card>
   );
 }

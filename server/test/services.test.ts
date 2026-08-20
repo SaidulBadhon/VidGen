@@ -32,7 +32,7 @@ import { voicePreviewRequestSchema } from "../src/models/schema.ts";
 import { matchesVideoAspect, filterMaterialsByAspect } from "../src/services/material/search.ts";
 import { materialSourceRecord } from "../src/services/material/download.ts";
 import { safePublicUrl } from "../src/services/material/http.ts";
-import { normalizeHashtags, fallbackSocialMetadata, buildScriptPrompt, languageLabel } from "../src/services/llm/prompts.ts";
+import { normalizeHashtags, normalizeYoutubeTags, fallbackSocialMetadata, fallbackBookShortPublish, buildScriptPrompt, languageLabel } from "../src/services/llm/prompts.ts";
 import { extractJson, formatScriptResponse, stripCodeFence } from "../src/services/llm/index.ts";
 import { bookProjectFolderName, bookSegmentFileStem, bookSegmentFolderName, rewriteFileStem, rewritePathPrefix, rewriteSegmentFilePath } from "../src/utils/paths.ts";
 import { isOwnerAlive, parseOwner, PROCESS_OWNER_ID } from "../src/tasks/owner.ts";
@@ -608,10 +608,34 @@ describe("llm helpers", () => {
     expect(normalizeHashtags(null, 3)).toEqual([]);
   });
 
+  test("normalises YouTube tags without hashes", () => {
+    expect(normalizeYoutubeTags(["#Me Before You", "Jojo Moyes", "me before you", ""], 8)).toEqual([
+      "Me Before You",
+      "Jojo Moyes",
+    ]);
+    expect(normalizeYoutubeTags("audiobook, booktok, shorts", 5)).toEqual(["audiobook", "booktok", "shorts"]);
+  });
+
   test("produces usable fallback metadata", () => {
     const metadata = fallbackSocialMetadata("A day in Shanghai", "Some script.", "tiktok");
     expect(metadata.title).toBe("A day in Shanghai");
     expect(metadata.hashtags).toHaveLength(5);
+  });
+
+  test("falls back to a book-aware YouTube listing", () => {
+    const listing = fallbackBookShortPublish({
+      bookTitle: "Me Before You",
+      author: "Jojo Moyes",
+      title: "She said yes. Then she saw the list.",
+      hook: "She said yes. Then she saw the list.",
+      script: "She said yes.",
+    });
+    expect(listing.youtubeTitle).toContain("She said yes");
+    expect(listing.description).toContain("Me Before You");
+    expect(listing.description).toContain("#shorts");
+    expect(listing.tags).toContain("Me Before You");
+    expect(listing.tags).toContain("Jojo Moyes");
+    expect(listing.tags.some((tag) => tag.startsWith("#"))).toBe(false);
   });
 
   test("always includes the run context in the prompt", () => {

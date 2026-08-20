@@ -9,7 +9,7 @@
 
 import { tasksCollection } from "../db/client.ts";
 import { TASK_STATE_PROCESSING, type CrossPostState } from "../models/const.ts";
-import type { TaskDocument, TaskWarning, CrossPostResult } from "../db/types.ts";
+import type { TaskDocument, TaskWarning, CrossPostResult, YoutubeUploadIntent, YoutubeUploadResult } from "../db/types.ts";
 import type { VideoParams } from "../models/schema.ts";
 import { logger } from "../utils/logger.ts";
 
@@ -34,6 +34,11 @@ export interface TaskUpdate {
   cross_post_results?: CrossPostResult[] | null;
   cross_post_error?: string | null;
   cross_post_owner?: string | null;
+  youtube_upload_state?: CrossPostState | null;
+  youtube_upload_results?: YoutubeUploadResult[] | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_owner?: string | null;
+  youtube_upload_intent?: YoutubeUploadIntent | null;
   owner_id?: string | null;
   params?: VideoParams;
   stop_at?: string;

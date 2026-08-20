@@ -18,6 +18,7 @@ import { SettingsLayout } from "./settings/layout.tsx";
 import { LlmSettingsPage } from "./settings/llm.tsx";
 import { MaterialsSettingsPage } from "./settings/materials.tsx";
 import { NarrationSettingsPage } from "./settings/narration.tsx";
+import { YoutubeSettingsPage } from "./settings/youtube.tsx";
 import { TasksPage } from "./pages/TasksPage.tsx";
 import { VideoScreen } from "./video/VideoScreen.tsx";
 
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="llm" element={<LlmSettingsPage />} />
           <Route path="narration" element={<NarrationSettingsPage />} />
           <Route path="materials" element={<MaterialsSettingsPage />} />
+          <Route path="youtube" element={<YoutubeSettingsPage />} />
           <Route path="cache" element={<CacheSettingsPage />} />
           <Route path="interface" element={<InterfaceSettingsPage />} />
         </Route>

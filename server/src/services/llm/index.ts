@@ -32,10 +32,20 @@ import {
   SOCIAL_PLATFORMS,
   buildScriptPrompt,
   buildSegmentBoundariesPrompt,
+  buildBookShortsPrompt,
+  buildBookShortRegenPrompt,
+  buildBookShortPublishPrompt,
+  buildBookSegmentPublishPrompt,
   buildSocialMetadataPrompt,
   buildTermsPrompt,
   clampText,
+  fallbackBookShortPublish,
+  fallbackBookSegmentPublish,
   fallbackSocialMetadata,
+  normalizeYoutubeTags,
+  YOUTUBE_SHORT_DESCRIPTION_MAX,
+  YOUTUBE_SHORT_TAG_COUNT,
+  YOUTUBE_SHORT_TITLE_MAX,
   limitScriptText,
   normalizeHashtags,
   normalizeScriptParagraphNumber,
@@ -399,6 +409,137 @@ export async function generateSocialMetadata(options: {
   return fallbackSocialMetadata(options.videoSubject, options.videoScript ?? "", platform);
 }
 
+// ---------------------------------------------------------------------------
+// Book-short YouTube listing
+// ---------------------------------------------------------------------------
+
+const bookShortPublishSchema = z.object({
+  youtube_title: z.string(),
+  description: z.string(),
+  tags: z.array(z.string()),
+});
+
+const bookSegmentPublishSchema = z.object({
+  description: z.string(),
+  tags: z.array(z.string()),
+});
+
+export interface BookShortPublishMetadata {
+  youtubeTitle: string;
+  description: string;
+  tags: string[];
+}
+
+/**
+ * Writes the YouTube listing for one hook short.
+ *
+ * Publishing must not be blocked by a copywriting failure, so a book-aware
+ * fallback is returned when the model is unavailable or returns unusable JSON.
+ */
+export async function generateBookShortPublishMetadata(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  title: string;
+  hook: string;
+  script: string;
+}): Promise<BookShortPublishMetadata> {
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildBookShortPublishPrompt({ ...options, language });
+  const fallback = fallbackBookShortPublish(options);
+
+  try {
+    const { model, apiKey } = await resolveProvider();
+    try {
+      const { object } = await generateObject({ model, schema: bookShortPublishSchema, prompt });
+      const metadata = finalizeBookShortPublish(object, fallback);
+      if (metadata) return metadata;
+    } catch (structuredError) {
+      logger.debug(
+        `structured book-short publish metadata failed, falling back to text: ${sanitizeError(structuredError, apiKey)}`,
+      );
+      const { text } = await generateText({ model, prompt });
+      const parsed = extractJson<Record<string, unknown>>(text, "{");
+      const metadata = parsed ? finalizeBookShortPublish(parsed, fallback) : null;
+      if (metadata) return metadata;
+    }
+  } catch (error) {
+    logger.warning(`failed to generate book-short publish metadata: ${sanitizeError(error)}`);
+  }
+
+  return fallback;
+}
+
+/**
+ * Writes the YouTube description and tags for one long-form book chapter.
+ *
+ * The chapter title is already chosen by the reviewer, so the model is not
+ * asked for a YouTube title. Failure falls back to a book-aware stub.
+ */
+export async function generateBookSegmentPublishMetadata(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  excerpt: string;
+  episode?: number;
+}): Promise<BookShortPublishMetadata> {
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildBookSegmentPublishPrompt({ ...options, language });
+  const fallback = fallbackBookSegmentPublish(options);
+
+  try {
+    const { model, apiKey } = await resolveProvider();
+    try {
+      const { object } = await generateObject({ model, schema: bookSegmentPublishSchema, prompt });
+      const metadata = finalizeBookSegmentPublish(object, fallback);
+      if (metadata) return metadata;
+    } catch (structuredError) {
+      logger.debug(
+        `structured book-segment publish metadata failed, falling back to text: ${sanitizeError(structuredError, apiKey)}`,
+      );
+      const { text } = await generateText({ model, prompt });
+      const parsed = extractJson<Record<string, unknown>>(text, "{");
+      const metadata = parsed ? finalizeBookSegmentPublish(parsed, fallback) : null;
+      if (metadata) return metadata;
+    }
+  } catch (error) {
+    logger.warning(`failed to generate book-segment publish metadata: ${sanitizeError(error)}`);
+  }
+
+  return fallback;
+}
+
+function finalizeBookShortPublish(
+  data: Record<string, unknown>,
+  fallback: BookShortPublishMetadata,
+): BookShortPublishMetadata | null {
+  const youtubeTitle = clampText(data.youtube_title ?? data.title, YOUTUBE_SHORT_TITLE_MAX);
+  const description = clampText(data.description ?? data.caption, YOUTUBE_SHORT_DESCRIPTION_MAX);
+  const tags = normalizeYoutubeTags(data.tags ?? data.hashtags, YOUTUBE_SHORT_TAG_COUNT);
+  if (!youtubeTitle && !description) return null;
+  return {
+    youtubeTitle: youtubeTitle || fallback.youtubeTitle,
+    description: description || fallback.description,
+    tags: tags.length > 0 ? tags : fallback.tags,
+  };
+}
+
+function finalizeBookSegmentPublish(
+  data: Record<string, unknown>,
+  fallback: BookShortPublishMetadata,
+): BookShortPublishMetadata | null {
+  const description = clampText(data.description ?? data.caption, YOUTUBE_SHORT_DESCRIPTION_MAX);
+  const tags = normalizeYoutubeTags(data.tags ?? data.hashtags, YOUTUBE_SHORT_TAG_COUNT);
+  if (!description) return null;
+  return {
+    youtubeTitle: fallback.youtubeTitle,
+    description,
+    tags: tags.length > 0 ? tags : fallback.tags,
+  };
+}
+
 function finalizeSocialMetadata(
   data: Record<string, unknown>,
   spec: { titleMax: number; captionMax: number; hashtagCount: number },
@@ -552,6 +693,162 @@ export async function generateSegmentBoundaries(options: {
 
   logger.error(`failed to detect book sections: ${lastError}`);
   return { sections: [], skipBlockIds: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Book hook shorts
+// ---------------------------------------------------------------------------
+
+const bookShortsSchema = z.object({
+  shorts: z.array(
+    z.object({
+      title: z.string(),
+      hook: z.string(),
+      script: z.string(),
+      start_block_id: z.string(),
+    }),
+  ),
+});
+
+export interface ProposedBookShort {
+  title: string;
+  hook: string;
+  script: string;
+  startBlockId: string;
+}
+
+/**
+ * Asks the configured model for 0–1 hook-short scripts from one book passage.
+ *
+ * An empty list is a valid answer (nothing hook-worthy in this chunk) and is
+ * not retried. Structured output is preferred; local models fall back to text
+ * the same way search terms do.
+ */
+export async function generateBookShorts(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  targetSeconds: number;
+  targetWords: number;
+  chunkIndex: number;
+  chunkCount: number;
+  lines: { blockId: string; kind: string; text: string }[];
+}): Promise<ProposedBookShort[]> {
+  if (options.lines.length === 0) return [];
+
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildBookShortsPrompt({ ...options, language });
+  logger.info(
+    `generating book shorts: title=${options.bookTitle}, chunk=${options.chunkIndex}/${options.chunkCount}`,
+  );
+
+  const { spec, model, apiKey } = await resolveProvider();
+  let lastError = "";
+  const attempts = 3;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { object } = await generateObject({ model, schema: bookShortsSchema, prompt });
+      const shorts = finalizeBookShortPayload(object);
+      logger.success(`completed: ${shorts.length} proposed short(s)`);
+      return shorts;
+    } catch (structuredError) {
+      logger.debug(
+        `structured book-short generation failed, falling back to text: ${errorMessage(structuredError)}`,
+      );
+      try {
+        const { text } = await generateText({ model, prompt });
+        const cleaned = normalizeTextResponse(text, spec.providerId);
+        const parsed = extractJson<unknown>(cleaned, "{");
+        const shorts = finalizeBookShortPayload(parsed);
+        logger.success(`completed: ${shorts.length} proposed short(s)`);
+        return shorts;
+      } catch (textError) {
+        lastError = sanitizeError(textError, apiKey);
+      }
+      logger.warning(`failed to generate book shorts: ${lastError}`);
+    }
+
+    if (attempt < attempts) {
+      logger.warning(`failed to generate book shorts, trying again... ${attempt}`);
+    }
+  }
+
+  logger.error(`failed to generate book shorts: ${lastError}`);
+  return [];
+}
+
+/**
+ * Rewrites one hook-short script from the same excerpt.
+ *
+ * Used when a reviewer likes the beat but not the wording. Failure returns an
+ * empty string so the caller can leave the previous script in place.
+ */
+export async function generateBookShortScript(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  title: string;
+  hook: string;
+  previousScript?: string;
+  targetSeconds: number;
+  targetWords: number;
+  excerpt: string;
+}): Promise<string> {
+  if (!options.excerpt.trim()) return "";
+
+  const language = resolveContentLanguage(options.language);
+  const prompt = buildBookShortRegenPrompt({ ...options, language });
+  logger.info(`rewriting book short script: title=${options.bookTitle}, short=${options.title}`);
+
+  const { spec, model, apiKey } = await resolveProvider();
+  let lastError = "";
+  const attempts = 3;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { text } = await generateText({ model, prompt });
+      const script = formatScriptResponse(normalizeTextResponse(text, spec.providerId));
+      if (script) {
+        logger.success("completed: rewritten book short script");
+        return script;
+      }
+      lastError = "model returned an empty script";
+    } catch (error) {
+      lastError = sanitizeError(error, apiKey);
+      logger.warning(`failed to rewrite book short script: ${lastError}`);
+    }
+
+    if (attempt < attempts) {
+      logger.warning(`failed to rewrite book short script, trying again... ${attempt}`);
+    }
+  }
+
+  logger.error(`failed to rewrite book short script: ${lastError}`);
+  return "";
+}
+
+function finalizeBookShortPayload(raw: unknown): ProposedBookShort[] {
+  const entries = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object" && Array.isArray((raw as { shorts?: unknown }).shorts)
+      ? (raw as { shorts: unknown[] }).shorts
+      : [];
+
+  const result: ProposedBookShort[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const title = clampText(record.title, 80);
+    const hook = clampText(record.hook, 220);
+    const script = clampText(record.script, 2000);
+    const startBlockId = String(record.start_block_id ?? record.startBlockId ?? "").trim();
+    if (!title || !script) continue;
+    result.push({ title, hook, script, startBlockId });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

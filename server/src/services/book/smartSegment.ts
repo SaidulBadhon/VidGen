@@ -11,9 +11,9 @@
  *
  * Unread apparatus is dropped here rather than packed into the opening video:
  * a table of contents is a list of chapter titles, not the chapters, and a
- * listener should never hear it. The first narratable video then announces the
- * book, the author, and the opening chapter before the body starts; later
- * videos announce the chapter they begin on.
+ * listener should never hear it. Every narratable video then announces the
+ * book and the chapter it begins on before the body starts, so a clip played
+ * on its own still opens with what it is. The first video also names the author.
  */
 
 import { generateSegmentBoundaries } from "../llm/index.ts";
@@ -389,13 +389,33 @@ export function formatOpeningTitle(structure: BookStructure, sectionTitle: strin
   return joined.slice(0, MAX_SEGMENT_TITLE_LENGTH);
 }
 
+/**
+ * New first-video title after the book or author is edited, or null when the
+ * stored title was written by hand and must be left alone.
+ *
+ * The planner stamps `Book — Author — Chapter` on segment 0. A reviewer who
+ * shortened that to "Prologue" should keep their name; only the generated
+ * shape is rewritten so the spoken lead-in and the folder name stay in step.
+ */
+export function rewriteOpeningTitleIfGenerated(
+  currentTitle: string,
+  previous: Pick<BookStructure, "title" | "author">,
+  next: Pick<BookStructure, "title" | "author">,
+): string | null {
+  const section = sectionNameFromTitle(currentTitle, previous as BookStructure);
+  if (currentTitle !== formatOpeningTitle(previous as BookStructure, section)) return null;
+  const rewritten = formatOpeningTitle(next as BookStructure, section);
+  return rewritten === currentTitle ? null : rewritten;
+}
+
 function normalizeAnnouncement(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 /**
- * Spoken lines that open a video, omitting any line already present at the
- * start of the segment so a heading block is not read twice.
+ * Spoken lines that open every video: book title, then chapter name, then
+ * the body. The first video also names the author. A line already present at
+ * the start of the segment is omitted so a heading block is not read twice.
  */
 export function announcementLines(
   structure: BookStructure,
@@ -403,10 +423,11 @@ export function announcementLines(
   existingBlocks: readonly Block[] = [],
 ): string[] {
   const section = sectionNameFromTitle(segment.title, structure);
-  const lines =
-    segment.index === 0
-      ? [speakableBookTitle(structure.title), speakablePersonName(structure.author), section]
-      : [section];
+  const lines = [
+    speakableBookTitle(structure.title),
+    segment.index === 0 ? speakablePersonName(structure.author) : "",
+    section,
+  ];
 
   const existing = existingBlocks
     .slice(0, 6)

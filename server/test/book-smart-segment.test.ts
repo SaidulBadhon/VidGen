@@ -12,6 +12,7 @@ import {
   findSkipBlockIds,
   formatOpeningTitle,
   heuristicSections,
+  rewriteOpeningTitleIfGenerated,
   looksLikeSectionTitle,
   looksLikeTocHeading,
   numberedChapterLabel,
@@ -559,8 +560,33 @@ describe("opening titles and announcements", () => {
     ).toEqual(["A Tale of Two Cities", "Charles Dickens"]);
   });
 
-  test("later videos announce only the chapter name", () => {
-    expect(announcementLines(book, { index: 1, title: "II. The Mail" }, [])).toEqual(["II. The Mail"]);
+  test("later videos announce the book title then the chapter name", () => {
+    expect(announcementLines(book, { index: 1, title: "II. The Mail" }, [])).toEqual([
+      "A Tale of Two Cities",
+      "II. The Mail",
+    ]);
+  });
+
+  test("later videos still name the book when the chapter heading is already first", () => {
+    expect(
+      announcementLines(book, { index: 1, title: "II. The Mail" }, [
+        { ...book.blocks[0]!, text: "II. The Mail" },
+      ]),
+    ).toEqual(["A Tale of Two Cities"]);
+  });
+
+  test("rewriteOpeningTitleIfGenerated updates a planner title when the author changes", () => {
+    const current = "A Tale of Two Cities — Charles Dickens — I. The Period";
+    expect(
+      rewriteOpeningTitleIfGenerated(current, book, { title: book.title, author: "Jojo Moyes" }),
+    ).toBe("A Tale of Two Cities — Jojo Moyes — I. The Period");
+    expect(
+      rewriteOpeningTitleIfGenerated(current, book, { title: book.title, author: "" }),
+    ).toBe("A Tale of Two Cities — I. The Period");
+  });
+
+  test("rewriteOpeningTitleIfGenerated leaves a hand-written first title alone", () => {
+    expect(rewriteOpeningTitleIfGenerated("Prologue", book, { title: book.title, author: "" })).toBeNull();
   });
 });
 

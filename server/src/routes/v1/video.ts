@@ -53,7 +53,7 @@ function taskFileToUri(file: string, endpoint: string, tasksDir: string): string
 
 /** Strips fields that exist only for server-side coordination. */
 function publicTask(task: TaskDocument): Record<string, unknown> {
-  const { cross_post_owner: _owner, owner_id: _ownerId, ...rest } = task;
+  const { cross_post_owner: _owner, owner_id: _ownerId, youtube_upload_owner: _ytOwner, ...rest } = task;
   return rest;
 }
 

@@ -104,6 +104,7 @@ volume, and it never has to be typed into a browser:
 ```
 GEMINI_API_KEY, OPENAI_API_KEY, GEMMA_API_KEY
 PEXELS_API_KEYS, PIXABAY_API_KEYS, COVERR_API_KEYS, TWELVELABS_API_KEYS
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
 ```
 
 The material variables take a comma-separated list, and the app rotates through
@@ -126,13 +127,23 @@ precedence over it, which is how `docker compose` passes these through.
 | Stock video | Pexels, Pixabay, Coverr, or your own local files |
 | AI music | Sonilo, ElevenLabs Music |
 | Subtitles | TTS word boundaries (`edge`), or Whisper transcription |
-| Publishing | TikTok, Instagram and YouTube Shorts via [upload-post.com](https://upload-post.com) |
+| Publishing | Native YouTube (multiple channels via Google OAuth), plus TikTok / Instagram / YouTube Shorts via [upload-post.com](https://upload-post.com) |
 | Reranking | TwelveLabs Marengo (optional) |
 
 Edge TTS, Kokoro and the bundled music library need no keys at all, so a local
 install can produce a video from a script with nothing configured. Kokoro runs the
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) model on your own CPU
 (~90 MB download on first use), so narration keeps working entirely offline.
+
+### Background music
+
+**Random** mixes a track from [`resource/songs/`](resource/songs/). That folder
+ships [CC0 public-domain](https://creativecommons.org/publicdomain/zero/1.0/)
+instrumentals (Loyalty Freak Music and Komiku, via the Internet Archive) — see
+[`resource/songs/SOURCES.md`](resource/songs/SOURCES.md). Drop extra files in
+the same folder, or upload them in the UI, to grow the library.
+
+Sonilo and ElevenLabs Music generate a new track per video and need API keys.
 
 ---
 
@@ -166,6 +177,8 @@ Base path `/api/v1`. Responses use `{ "status": 200, "data": …, "message": "�
 | `DELETE` | `/tasks/:id` | Delete a task and its files |
 | `POST` | `/scripts`, `/terms`, `/social-metadata` | LLM helpers |
 | `GET`/`POST` | `/settings` | Read and update settings |
+| `GET`/`POST`/`DELETE` | `/youtube/channels`, `/youtube/oauth/start`, `/youtube/uploads` | Connect YouTube channels and upload |
+| `GET`/`POST` | `/youtube/channels/:id/playlists` | List or create playlists for a connected channel |
 | `GET`/`POST` | `/musics`, `/video_materials` | List and upload media |
 | `GET` | `/voices?server=…` | Voice catalogue for a TTS engine |
 | `GET`/`POST` | `/cache/stats`, `/cache/clear` | Cache management |

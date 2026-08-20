@@ -27,14 +27,18 @@ import {
   deleteBlockEdit,
   deleteBook,
   deleteBookFiles,
+  deleteBookShort,
   getBook,
   getBookSegment,
+  getBookShort,
   listBlockEdits,
   listBookSegments,
+  listBookShorts,
   listBooks,
   listDecisionOverrides,
   patchBook,
   patchBookSegment,
+  patchBookShort,
   readBookStructure,
   replaceBookSegments,
   rewriteSegmentOutputPaths,
@@ -47,8 +51,8 @@ import {
   aggregateSegmentProgress,
   isBookOcrState,
 } from "../../db/books.ts";
-import type { BookDocument, BookSegmentDocument } from "../../db/types.ts";
-import { badRequest, conflict, notFound } from "../../http/errors.ts";
+import type { BookDocument, BookSegmentDocument, BookShortDocument } from "../../db/types.ts";
+import { badRequest, conflict, notFound, tooManyRequests } from "../../http/errors.ts";
 import { serveFileWithRange } from "../../http/staticFiles.ts";
 import {
   bookBlockTextSchema,
@@ -58,10 +62,14 @@ import {
   bookRenderRequestSchema,
   bookSegmentOptionsSchema,
   bookSegmentPatchSchema,
+  bookShortPatchSchema,
+  bookShortsPlanRequestSchema,
+  bookShortsRenderRequestSchema,
   bookUploadOptionsSchema,
   renderParamsToDocument,
   segmentOptionsFromDocument,
   segmentOptionsToDocument,
+  shortsRenderParamsToDocument,
 } from "../../models/bookSchema.ts";
 import { extractBook, detectBookFormat, type PdfScanReport } from "../../services/book/extract/index.ts";
 import { decisionSummary, keptBlocks } from "../../services/book/filter/decisions.ts";
@@ -74,9 +82,27 @@ import {
   renderBookSegments,
   segmentBlocks,
 } from "../../tasks/bookPipeline.ts";
+import {
+  ACTIVE_SHORT_STATES,
+  publicShortsPlan,
+  renderBookShorts,
+  shortGateStats,
+  shortsPlanIsBusy,
+  shortsWorkIsActive,
+  startBookShortsPlan,
+} from "../../tasks/bookShortsPipeline.ts";
 import { estimateSpokenSeconds } from "../../services/book/segment.ts";
+import {
+  blocksForShort,
+  bookIsReadyForShorts,
+  clampShortScript,
+  DEFAULT_SHORT_OPTIONS,
+  targetScriptWords,
+} from "../../services/book/shorts.ts";
+import { generateBookShortPublishMetadata, generateBookShortScript } from "../../services/llm/index.ts";
+import { rewriteOpeningTitleIfGenerated } from "../../services/book/smartSegment.ts";
 import { ocrSourcePath, startBookOcr } from "../../tasks/ocrPipeline.ts";
-import { taskQueue } from "../../tasks/queue.ts";
+import { TaskQueueFullError, taskQueue } from "../../tasks/queue.ts";
 import { deleteTask, getRecentTaskLogs, getTask } from "../../tasks/state.ts";
 import { resolvePathWithinDirectory, sanitizeUploadFilename, UnsafePathError } from "../../utils/fileSecurity.ts";
 import { errorMessage, logger } from "../../utils/logger.ts";
@@ -222,7 +248,7 @@ function segmentFileToUri(file: string | null | undefined): string | null {
 
 /** Strips host paths; the cover is reachable through its own endpoint instead. */
 function publicBook(book: BookDocument): Record<string, unknown> {
-  const { cover_path, ocr, ...rest } = book;
+  const { cover_path, ocr, shorts, ...rest } = book;
   // The OCR record carries the absolute path of the stored upload, which is a
   // host path like any other and stays on the server. Everything else in it —
   // the page counts the import screen shows — is safe to send.
@@ -231,6 +257,7 @@ function publicBook(book: BookDocument): Record<string, unknown> {
   return {
     ...rest,
     ...(ocr ? { ocr: publicOcr } : {}),
+    shorts: publicShortsPlan(shorts),
     has_cover: Boolean(cover_path && existsSync(cover_path)),
   };
 }
@@ -246,6 +273,30 @@ function publicSegment(segment: BookSegmentDocument): Record<string, unknown> {
     video_url: segmentFileToUri(video_path),
     subtitle_url: segmentFileToUri(subtitle_path),
   };
+}
+
+function publicShort(short: BookShortDocument): Record<string, unknown> {
+  const { video_path, audio_path, subtitle_path, block_ids, ...rest } = short;
+  return {
+    ...rest,
+    block_count: (block_ids ?? []).length,
+    video_url: segmentFileToUri(video_path),
+    audio_url: segmentFileToUri(audio_path),
+    subtitle_url: segmentFileToUri(subtitle_path),
+  };
+}
+
+function requireIdleShorts(bookId: string, shorts: BookShortDocument[], planState?: string | null): void {
+  if (planState === "planning") {
+    throw conflict("hook shorts are still being planned; wait until that finishes", bookId);
+  }
+  const active = shorts.filter((short) => ACTIVE_SHORT_STATES.has(short.state));
+  if (active.length > 0) {
+    throw conflict(
+      `${active.length} short(s) are still rendering; cancel them before changing the plan`,
+      bookId,
+    );
+  }
 }
 
 async function requireBook(bookId: string): Promise<BookDocument> {
@@ -547,55 +598,103 @@ bookRouter.get("/books", async (c) => {
 });
 
 /**
- * Renames a book.
+ * Updates a book's display title and/or author.
  *
- * The display title is also the output folder name, so a rename has to move
- * that folder and rewrite the absolute paths stored on finished segments.
- * Refused while anything is rendering: those tasks are already writing into
- * the old folder, and moving it underneath them would lose the files.
+ * The title is also the output folder name, so a rename has to move that folder
+ * and rewrite the absolute paths stored on finished segments. The author is
+ * spoken on the first video, so changing it writes through to structure.json
+ * (where narration reads it) and marks that segment unrendered. Refused while
+ * anything is rendering: those tasks are already writing into the old folder,
+ * and moving it underneath them would lose the files.
  */
 bookRouter.patch("/books/:id", async (c) => {
   const bookId = c.req.param("id");
   const book = await requireBook(bookId);
-  const { title } = bookPatchSchema.parse(await c.req.json().catch(() => ({})));
+  const patch = bookPatchSchema.parse(await c.req.json().catch(() => ({})));
 
-  if (title === book.title) {
-    return c.json(getResponse(200, { book_id: bookId, title }));
+  const nextTitle = patch.title ?? book.title;
+  const nextAuthor = patch.author !== undefined ? patch.author : book.author;
+  const titleChanged = nextTitle !== book.title;
+  const authorChanged = nextAuthor !== book.author;
+
+  if (!titleChanged && !authorChanged) {
+    return c.json(getResponse(200, { book_id: bookId, title: book.title, author: book.author }));
   }
 
   requireIdleSegments(bookId, await listBookSegments(bookId));
 
-  const tasksRoot = taskDir();
-  const fromDir = join(tasksRoot, bookProjectFolderName(book.title, bookId));
-  const toDir = join(tasksRoot, bookProjectFolderName(title, bookId));
+  if (titleChanged) {
+    const tasksRoot = taskDir();
+    const fromDir = join(tasksRoot, bookProjectFolderName(book.title, bookId));
+    const toDir = join(tasksRoot, bookProjectFolderName(nextTitle, bookId));
 
-  if (fromDir !== toDir && existsSync(fromDir)) {
-    if (existsSync(toDir)) {
-      throw badRequest(
-        `cannot rename: an output folder named "${bookProjectFolderName(title, bookId)}" already exists`,
-        bookId,
-      );
+    if (fromDir !== toDir && existsSync(fromDir)) {
+      if (existsSync(toDir)) {
+        throw badRequest(
+          `cannot rename: an output folder named "${bookProjectFolderName(nextTitle, bookId)}" already exists`,
+          bookId,
+        );
+      }
+      await rename(fromDir, toDir);
     }
-    await rename(fromDir, toDir);
+    await rewriteSegmentOutputPaths(bookId, fromDir, toDir);
   }
-  await rewriteSegmentOutputPaths(bookId, fromDir, toDir);
 
   const structure = await readBookStructure(bookId);
-  if (structure && structure.title !== title) {
-    await writeBookStructure(bookId, { ...structure, title });
+  if (structure && (structure.title !== nextTitle || structure.author !== nextAuthor)) {
+    await writeBookStructure(bookId, { ...structure, title: nextTitle, author: nextAuthor });
   }
 
-  await patchBook(bookId, { title });
-  logger.info(`book renamed: ${bookId} "${book.title}" -> "${title}"`);
-  return c.json(getResponse(200, { book_id: bookId, title }));
+  const first = await getBookSegment(bookId, 0);
+  if (first) {
+    const rewritten = structure
+      ? rewriteOpeningTitleIfGenerated(
+          first.title,
+          { title: book.title, author: book.author },
+          { title: nextTitle, author: nextAuthor },
+        )
+      : null;
+    const fields: Parameters<typeof patchBookSegment>[2] = {};
+    if (rewritten) {
+      const paths = await relocateSegmentOutput({ ...book, title: nextTitle }, first, rewritten);
+      Object.assign(fields, { title: rewritten, ...paths });
+    }
+    // Only the first video names the author, so only its audio is now wrong.
+    if (authorChanged) {
+      Object.assign(fields, {
+        state: "pending",
+        task_id: null,
+        audio_path: null,
+        video_path: null,
+        subtitle_path: null,
+        error: null,
+      });
+    }
+    if (Object.keys(fields).length > 0) {
+      await patchBookSegment(bookId, 0, fields);
+      if (authorChanged) await syncBookState(bookId);
+    }
+  }
+
+  await patchBook(bookId, {
+    ...(titleChanged ? { title: nextTitle } : {}),
+    ...(authorChanged ? { author: nextAuthor } : {}),
+  });
+
+  if (titleChanged) logger.info(`book renamed: ${bookId} "${book.title}" -> "${nextTitle}"`);
+  if (authorChanged) {
+    logger.info(`book author changed: ${bookId} "${book.author}" -> "${nextAuthor}"`);
+  }
+  return c.json(getResponse(200, { book_id: bookId, title: nextTitle, author: nextAuthor }));
 });
 
 bookRouter.get("/books/:id", async (c) => {
   const bookId = c.req.param("id");
   const book = await requireBook(bookId);
 
-  const [segments, structure, overrides] = await Promise.all([
+  const [segments, shorts, structure, overrides] = await Promise.all([
     listBookSegments(bookId),
+    listBookShorts(bookId),
     readBookStructure(bookId),
     listDecisionOverrides(bookId),
   ]);
@@ -607,6 +706,11 @@ bookRouter.get("/books/:id", async (c) => {
       book: publicBook(book),
       progress: aggregateSegmentProgress(segments),
       segments: segments.map(publicSegment),
+      shorts: {
+        plan: publicShortsPlan(book.shorts),
+        items: shorts.map(publicShort),
+        progress: aggregateSegmentProgress(shorts),
+      },
       decisions: decisionSummary(decisions),
       overrides: overrides.length,
       queue: bookGateStats(bookId),
@@ -1166,6 +1270,282 @@ bookRouter.post("/books/:id/segments/:index/render", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// Hook shorts
+// ---------------------------------------------------------------------------
+
+function parseShortIndex(raw: string, bookId: string): number {
+  const index = Number(raw);
+  if (!Number.isInteger(index) || index < 0) throw badRequest("short index must be a non-negative integer", bookId);
+  return index;
+}
+
+bookRouter.get("/books/:id/shorts", async (c) => {
+  const bookId = c.req.param("id");
+  const book = await requireBook(bookId);
+  const shorts = await listBookShorts(bookId);
+  return c.json(
+    getResponse(200, {
+      book_id: bookId,
+      plan: publicShortsPlan(book.shorts),
+      shorts: shorts.map(publicShort),
+      progress: aggregateSegmentProgress(shorts),
+      queue: shortGateStats(bookId),
+    }),
+  );
+});
+
+bookRouter.post("/books/:id/shorts/plan", async (c) => {
+  const bookId = c.req.param("id");
+  const book = await requireBook(bookId);
+  if (!bookIsReadyForShorts(book.state)) {
+    if (book.state === "failed") throw badRequest("this book failed to extract", bookId);
+    throw conflict("this book is not ready to plan shorts from yet", bookId);
+  }
+
+  const shorts = await listBookShorts(bookId);
+  requireIdleShorts(bookId, shorts, book.shorts?.state);
+
+  const raw = await c.req.json().catch(() => ({}));
+  const body = bookShortsPlanRequestSchema.parse(raw && typeof raw === "object" ? raw : {});
+
+  try {
+    const started = await startBookShortsPlan({
+      bookId,
+      options: {
+        targetDurationSeconds: body.target_duration_seconds,
+        maxShorts: body.max_shorts,
+        wordsPerMinute: body.words_per_minute,
+      },
+    });
+    logger.info(`book shorts plan started: ${bookId}, revision: ${started.revision}`);
+    return c.json(
+      getResponse(200, {
+        book_id: bookId,
+        task_id: started.taskId,
+        revision: started.revision,
+      }),
+    );
+  } catch (error) {
+    if (error instanceof TaskQueueFullError) throw tooManyRequests(error.message, bookId);
+    throw error;
+  }
+});
+
+bookRouter.patch("/books/:id/shorts/:index", async (c) => {
+  const bookId = c.req.param("id");
+  const index = parseShortIndex(c.req.param("index"), bookId);
+  await requireBook(bookId);
+
+  const short = await getBookShort(bookId, index);
+  if (!short) throw notFound("short not found", bookId);
+  if (ACTIVE_SHORT_STATES.has(short.state)) {
+    throw conflict("this short is still rendering", bookId);
+  }
+
+  const body = bookShortPatchSchema.parse(await c.req.json());
+  const fields: {
+    title?: string;
+    script?: string;
+    hook?: string;
+    youtube_title?: string;
+    description?: string;
+    tags?: string[];
+    estimated_duration?: number;
+    state?: "pending";
+  } = {};
+  if (body.title !== undefined) fields.title = body.title;
+  if (body.hook !== undefined) fields.hook = body.hook;
+  if (body.youtube_title !== undefined) fields.youtube_title = body.youtube_title;
+  if (body.description !== undefined) fields.description = body.description;
+  if (body.tags !== undefined) fields.tags = body.tags;
+  if (body.script !== undefined) {
+    fields.script = body.script;
+    fields.estimated_duration = estimateSpokenSeconds(
+      body.script,
+      (await getBook(bookId))?.segment_options.words_per_minute || DEFAULT_SHORT_OPTIONS.wordsPerMinute,
+    );
+    fields.state = "pending";
+  }
+
+  await patchBookShort(bookId, index, fields);
+  const updated = await getBookShort(bookId, index);
+  return c.json(getResponse(200, updated ? publicShort(updated) : { book_id: bookId, index }));
+});
+
+bookRouter.delete("/books/:id/shorts/:index", async (c) => {
+  const bookId = c.req.param("id");
+  const index = parseShortIndex(c.req.param("index"), bookId);
+  await requireBook(bookId);
+
+  const short = await getBookShort(bookId, index);
+  if (!short) throw notFound("short not found", bookId);
+  if (ACTIVE_SHORT_STATES.has(short.state)) {
+    throw conflict("this short is still rendering", bookId);
+  }
+
+  await deleteBookShort(bookId, index);
+  logger.info(`book short dropped: ${bookId}/${index}`);
+  return c.json(getResponse(200, { book_id: bookId, index }));
+});
+
+bookRouter.post("/books/:id/shorts/:index/regenerate", async (c) => {
+  const bookId = c.req.param("id");
+  const index = parseShortIndex(c.req.param("index"), bookId);
+  const book = await requireBook(bookId);
+
+  const short = await getBookShort(bookId, index);
+  if (!short) throw notFound("short not found", bookId);
+  if (ACTIVE_SHORT_STATES.has(short.state)) {
+    throw conflict("this short is still rendering", bookId);
+  }
+  if (shortsPlanIsBusy(book.shorts)) {
+    throw conflict("hook shorts are still being planned", bookId);
+  }
+
+  const loaded = await readBookStructure(bookId);
+  if (!loaded) throw notFound("the extracted book structure is missing", bookId);
+  const edited = applyBlockEdits(loaded, await listBlockEdits(bookId));
+  const excerptBlocks = blocksForShort(edited, short.block_ids, short.start_block_id);
+  const excerpt = excerptBlocks
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join("\n\n");
+  if (!excerpt) throw badRequest("this short has no source excerpt left to rewrite from", bookId);
+
+  const options = {
+    targetDurationSeconds: book.shorts?.target_duration_seconds || DEFAULT_SHORT_OPTIONS.targetDurationSeconds,
+    maxShorts: book.shorts?.max_shorts || DEFAULT_SHORT_OPTIONS.maxShorts,
+    wordsPerMinute: book.shorts?.words_per_minute || DEFAULT_SHORT_OPTIONS.wordsPerMinute,
+  };
+  const script = await generateBookShortScript({
+    bookTitle: book.title,
+    author: book.author,
+    language: book.language,
+    chapterTitle: short.chapter_title,
+    title: short.title,
+    hook: short.hook,
+    previousScript: short.script,
+    targetSeconds: options.targetDurationSeconds,
+    targetWords: targetScriptWords(options),
+    excerpt,
+  });
+  if (!script) throw badRequest("the model returned an empty script; try again", bookId);
+
+  const spoken = clampShortScript(script, Math.round(targetScriptWords(options) * 1.25));
+  const publish = await generateBookShortPublishMetadata({
+    bookTitle: book.title,
+    author: book.author,
+    language: book.language,
+    chapterTitle: short.chapter_title,
+    title: short.title,
+    hook: short.hook,
+    script: spoken,
+  });
+  await patchBookShort(bookId, index, {
+    script: spoken,
+    estimated_duration: estimateSpokenSeconds(spoken, options.wordsPerMinute),
+    youtube_title: publish.youtubeTitle,
+    description: publish.description,
+    tags: publish.tags,
+    state: "pending",
+    error: null,
+    video_path: null,
+    audio_path: null,
+    subtitle_path: null,
+    task_id: null,
+  });
+  const updated = await getBookShort(bookId, index);
+  return c.json(getResponse(200, updated ? publicShort(updated) : { book_id: bookId, index }));
+});
+
+bookRouter.post("/books/:id/shorts/:index/metadata", async (c) => {
+  const bookId = c.req.param("id");
+  const index = parseShortIndex(c.req.param("index"), bookId);
+  const book = await requireBook(bookId);
+
+  const short = await getBookShort(bookId, index);
+  if (!short) throw notFound("short not found", bookId);
+  if (ACTIVE_SHORT_STATES.has(short.state)) {
+    throw conflict("this short is still rendering", bookId);
+  }
+  if (shortsPlanIsBusy(book.shorts)) {
+    throw conflict("hook shorts are still being planned", bookId);
+  }
+
+  const publish = await generateBookShortPublishMetadata({
+    bookTitle: book.title,
+    author: book.author,
+    language: book.language,
+    chapterTitle: short.chapter_title,
+    title: short.title,
+    hook: short.hook,
+    script: short.script,
+  });
+  await patchBookShort(bookId, index, {
+    youtube_title: publish.youtubeTitle,
+    description: publish.description,
+    tags: publish.tags,
+  });
+  const updated = await getBookShort(bookId, index);
+  return c.json(getResponse(200, updated ? publicShort(updated) : { book_id: bookId, index }));
+});
+
+bookRouter.post("/books/:id/shorts/render", async (c) => {
+  const bookId = c.req.param("id");
+  const book = await requireBook(bookId);
+  if (shortsPlanIsBusy(book.shorts)) {
+    throw conflict("hook shorts are still being planned", bookId);
+  }
+
+  const raw = await c.req.json().catch(() => ({}));
+  const body =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...(raw as Record<string, unknown>) }
+      : {};
+  if (!String(body.voice_name ?? "").trim()) {
+    body.voice_name = resolveVoiceName(book.shorts?.render_params?.voice_name || "");
+  }
+  const request = bookShortsRenderRequestSchema.parse(body);
+
+  const shorts = await listBookShorts(bookId);
+  if (shorts.length === 0) throw badRequest("this book has no shorts to render", bookId);
+
+  const requested = request.indexes?.length ? new Set(request.indexes) : null;
+  const targets = shorts.filter(
+    (short) => !ACTIVE_SHORT_STATES.has(short.state) && (requested === null || requested.has(short.index)),
+  );
+  if (targets.length === 0) throw conflict("every requested short is already rendering", bookId);
+
+  const params = shortsRenderParamsToDocument(request);
+  const result = await renderBookShorts(
+    bookId,
+    targets.map((short) => short.index),
+    params,
+  );
+  logger.info(`book shorts render accepted: ${bookId}, shorts: ${result.accepted.length}`);
+  return c.json(getResponse(200, { book_id: bookId, revision: result.revision, accepted: result.accepted }));
+});
+
+bookRouter.post("/books/:id/shorts/:index/render", async (c) => {
+  const bookId = c.req.param("id");
+  const index = parseShortIndex(c.req.param("index"), bookId);
+  const book = await requireBook(bookId);
+
+  const short = await getBookShort(bookId, index);
+  if (!short) throw notFound("short not found", bookId);
+  if (ACTIVE_SHORT_STATES.has(short.state)) throw conflict("this short is already rendering", bookId);
+
+  const body = await c.req.json().catch(() => null);
+  const params = body
+    ? shortsRenderParamsToDocument(bookShortsRenderRequestSchema.parse(body))
+    : book.shorts?.render_params ?? null;
+  if (!params) throw badRequest("this book has not rendered shorts yet; send the render settings", bookId);
+
+  const result = await renderBookShorts(bookId, [index], params);
+  return c.json(getResponse(200, { book_id: bookId, revision: result.revision, accepted: result.accepted }));
+});
+
+// ---------------------------------------------------------------------------
 // Progress stream
 // ---------------------------------------------------------------------------
 
@@ -1223,6 +1603,31 @@ async function recentBookLogs(
   return lines.slice(-MAX_RECENT_LOG_LINES);
 }
 
+interface ShortLogLine {
+  index: number;
+  line: string;
+}
+
+async function recentShortLogs(
+  shorts: readonly BookShortDocument[],
+  book: BookDocument,
+): Promise<ShortLogLine[]> {
+  const active = shorts
+    .filter((short) => short.task_id && ACTIVE_SHORT_STATES.has(short.state))
+    .slice(0, MAX_LOGGED_SEGMENTS);
+  const planTaskId = book.shorts?.state === "planning" ? book.shorts.task_id : null;
+  const taskIds = [...active.map((short) => short.task_id!), ...(planTaskId ? [planTaskId] : [])];
+  if (taskIds.length === 0) return [];
+
+  const logs = await getRecentTaskLogs(taskIds, LOG_LINES_PER_SEGMENT);
+  const lines: ShortLogLine[] = [];
+  for (const short of active) {
+    for (const line of logs.get(short.task_id!) ?? []) lines.push({ index: short.index, line });
+  }
+  for (const line of planTaskId ? (logs.get(planTaskId) ?? []) : []) lines.push({ index: -1, line });
+  return lines.slice(-MAX_RECENT_LOG_LINES);
+}
+
 /**
  * Aggregate progress over SSE.
  *
@@ -1244,10 +1649,13 @@ bookRouter.get("/books/:id/events", async (c) => {
       }
 
       const segments = await listBookSegments(bookId);
+      const shorts = await listBookShorts(bookId);
       const progress = aggregateSegmentProgress(segments);
+      const shortsProgress = aggregateSegmentProgress(shorts);
       // A book being recognised has no segments at all, so the segment-derived
       // state reads `ready` — which is the one thing it certainly is not.
       const recognising = isBookOcrState(book.state);
+      const shortsBusy = shortsWorkIsActive(book.shorts, shorts);
       const payload = JSON.stringify({
         book_id: bookId,
         state: recognising ? book.state : progress.state,
@@ -1270,7 +1678,29 @@ bookRouter.get("/books/:id/events", async (c) => {
               mean_confidence: book.ocr.mean_confidence,
             }
           : null,
+        shorts: {
+          state: shortsBusy
+            ? shortsPlanIsBusy(book.shorts)
+              ? "planning"
+              : "rendering"
+            : (book.shorts?.state ?? "idle"),
+          revision: book.shorts?.revision ?? 0,
+          chunks_total: book.shorts?.chunks_total ?? 0,
+          chunks_done: book.shorts?.chunks_done ?? 0,
+          counts: {
+            total: shortsProgress.total,
+            pending: shortsProgress.pending,
+            queued: shortsProgress.queued,
+            rendering: shortsProgress.rendering,
+            complete: shortsProgress.complete,
+            failed: shortsProgress.failed,
+            progress: shortsProgress.progress,
+            state: shortsProgress.state,
+          },
+          items: shorts.map((short) => ({ index: short.index, state: short.state })),
+        },
         recent_logs: await recentBookLogs(segments, book),
+        shorts_logs: await recentShortLogs(shorts, book),
       });
 
       if (payload !== lastPayload) {
@@ -1278,7 +1708,7 @@ bookRouter.get("/books/:id/events", async (c) => {
         lastPayload = payload;
       }
 
-      if (progress.state !== "rendering" && !recognising) {
+      if (progress.state !== "rendering" && !recognising && !shortsBusy) {
         await stream.writeSSE({ event: "done", data: payload });
         return;
       }
@@ -1313,13 +1743,18 @@ bookRouter.delete("/books/:id", async (c) => {
   const book = await requireBook(bookId);
 
   const segments = await listBookSegments(bookId);
+  const shorts = await listBookShorts(bookId);
   let cancelled = 0;
   for (const segment of segments) {
     if (segment.task_id && taskQueue.cancel(segment.task_id)) cancelled += 1;
   }
+  for (const short of shorts) {
+    if (short.task_id && taskQueue.cancel(short.task_id)) cancelled += 1;
+  }
   // An OCR pass is not a segment, so the loop above never sees it; left running
   // it would keep writing a manifest into a directory about to be deleted.
   if (book?.ocr?.task_id && taskQueue.cancel(book.ocr.task_id)) cancelled += 1;
+  if (book?.shorts?.task_id && taskQueue.cancel(book.shorts.task_id)) cancelled += 1;
 
   // Bumping the revision makes any task that slipped past cancellation discard
   // its results instead of writing into a directory that is about to vanish.
@@ -1333,10 +1768,19 @@ bookRouter.delete("/books/:id", async (c) => {
       await deleteTask(segment.task_id);
     }
   }
+  for (const short of shorts) {
+    if (!short.task_id) continue;
+    const task = await getTask(short.task_id);
+    if (task) {
+      await rm(join(taskDir(), short.task_id), { recursive: true, force: true });
+      await deleteTask(short.task_id);
+    }
+  }
   await rm(join(taskDir(), bookProjectFolderName(book.title, book._id)), { recursive: true, force: true });
   // The OCR task owns no task directory — its output lives in the book's own —
   // so only the record has to go.
   if (book.ocr?.task_id) await deleteTask(book.ocr.task_id);
+  if (book.shorts?.task_id) await deleteTask(book.shorts.task_id);
 
   await deleteBook(bookId);
   await deleteBookFiles(bookId);

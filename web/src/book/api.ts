@@ -79,6 +79,14 @@ export const MAX_SEGMENT_SECONDS = 4 * 60 * 60;
 export const MIN_WORDS_PER_MINUTE = 60;
 export const MAX_WORDS_PER_MINUTE = 400;
 
+export const MIN_SHORT_SECONDS = 30;
+export const MAX_SHORT_SECONDS = 90;
+export const DEFAULT_SHORT_SECONDS = 60;
+export const MIN_MAX_SHORTS = 1;
+export const MAX_MAX_SHORTS = 30;
+export const DEFAULT_MAX_SHORTS = 12;
+export const VIDEO_SOURCES: readonly string[] = ["pexels", "pixabay", "coverr", "local"];
+
 export const ACCEPTED_BOOK_EXTENSIONS = ".epub,.pdf,.txt,.md,.markdown,.text";
 export const ACCEPTED_COVER_EXTENSIONS = ".png,.jpg,.jpeg,.webp";
 
@@ -152,6 +160,100 @@ export interface BookRenderRequest {
   segment_indexes?: number[];
 }
 
+export type BookShortState = "pending" | "queued" | "rendering" | "complete" | "failed";
+export type BookShortsPlanState = "idle" | "planning" | "ready" | "failed";
+
+export interface BookShortsRenderParams {
+  voice_name: string;
+  voice_rate: number;
+  voice_volume: number;
+  video_aspect: string;
+  video_source?: string;
+  bgm_type: string;
+  bgm_file: string;
+  bgm_volume: number;
+  font_name: string;
+  font_size: number;
+  n_threads: number;
+}
+
+export interface BookShortsPlan {
+  state: BookShortsPlanState;
+  revision: number;
+  chunks_total: number;
+  chunks_done: number;
+  target_duration_seconds: number;
+  max_shorts: number;
+  words_per_minute?: number;
+  error?: string | null;
+  render_params?: BookShortsRenderParams | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface BookShortsRenderRequest {
+  voice_name: string;
+  voice_rate?: number;
+  voice_volume?: number;
+  video_aspect?: string;
+  video_source?: string;
+  bgm_type?: string;
+  bgm_file?: string;
+  bgm_volume?: number;
+  font_name?: string;
+  font_size?: number;
+  n_threads?: number;
+  indexes?: number[];
+}
+
+export interface BookShort {
+  _id: string;
+  book_id: string;
+  index: number;
+  title: string;
+  hook: string;
+  script: string;
+  youtube_title?: string;
+  description?: string;
+  tags?: string[];
+  chapter_title: string;
+  start_block_id: string;
+  estimated_duration: number;
+  state: BookShortState;
+  revision: number;
+  block_count?: number;
+  task_id?: string | null;
+  error?: string | null;
+  updated_at?: string;
+  video_url: string | null;
+  audio_url: string | null;
+  subtitle_url: string | null;
+  youtube_upload_state?: string | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_results?: {
+    success: boolean;
+    channel_id: string;
+    channel_title: string;
+    video_id?: string;
+    video_url?: string;
+    error?: string;
+  }[] | null;
+}
+
+export interface BookShortsBundle {
+  plan: BookShortsPlan;
+  items: BookShort[];
+  progress: BookProgress;
+}
+
+export interface BookShortsPage {
+  book_id: string;
+  plan: BookShortsPlan | null;
+  shorts: BookShort[];
+  progress: BookProgress;
+  queue: { active: number; waiting: number; limit: number };
+}
+
 /**
  * How far a scanned book's recognition has got.
  *
@@ -191,6 +293,8 @@ export interface Book {
   render_params?: BookRenderParams | null;
   /** Present only for a scanned PDF that needed OCR. */
   ocr?: BookOcr | null;
+  /** Present once hook shorts have been planned or attempted. */
+  shorts?: BookShortsPlan | null;
   warnings?: string[];
   error?: string | null;
   created_at?: string;
@@ -229,6 +333,19 @@ export interface BookSegment {
   audio_url: string | null;
   video_url: string | null;
   subtitle_url: string | null;
+  youtube_title?: string;
+  description?: string;
+  tags?: string[];
+  youtube_upload_state?: string | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_results?: {
+    success: boolean;
+    channel_id: string;
+    channel_title: string;
+    video_id?: string;
+    video_url?: string;
+    error?: string;
+  }[] | null;
 }
 
 export interface BookBlock {
@@ -306,6 +423,7 @@ export interface BookDetail {
   decisions: DecisionSummary;
   overrides: number;
   queue: { active: number; waiting: number; limit: number };
+  shorts?: BookShortsBundle;
 }
 
 export interface BookUploadResult {
@@ -368,6 +486,7 @@ export interface RenderResult {
 export interface BookRenameResult {
   book_id: string;
   title: string;
+  author: string;
 }
 
 export interface SegmentRenameResult {
@@ -398,12 +517,15 @@ export const bookApi = {
 
   get: (bookId: string) => request<BookDetail>(bookPath(bookId)),
 
-  /** Changes the display name. The original filename is left alone. */
-  rename: (bookId: string, title: string) =>
+  /** Changes the display title and/or author. The original filename is left alone. */
+  patch: (bookId: string, fields: { title?: string; author?: string }) =>
     request<BookRenameResult>(bookPath(bookId), {
       method: "PATCH",
-      body: JSON.stringify({ title }),
+      body: JSON.stringify(fields),
     }),
+
+  /** Changes the display name. The original filename is left alone. */
+  rename: (bookId: string, title: string) => bookApi.patch(bookId, { title }),
 
   blocks: (bookId: string, page = 1, pageSize = 50) =>
     request<BookBlockPage>(bookPath(bookId, `/blocks?page=${page}&page_size=${pageSize}`)),
@@ -478,6 +600,52 @@ export const bookApi = {
       ...(body ? { body: JSON.stringify(body) } : {}),
     }),
 
+  listShorts: (bookId: string) => request<BookShortsPage>(bookPath(bookId, "/shorts")),
+
+  planShorts: (bookId: string, body?: { target_duration_seconds?: number; max_shorts?: number; words_per_minute?: number }) =>
+    request<{ book_id: string; task_id: string; revision: number }>(bookPath(bookId, "/shorts/plan"), {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
+
+  patchShort: (
+    bookId: string,
+    index: number,
+    fields: {
+      title?: string;
+      hook?: string;
+      script?: string;
+      youtube_title?: string;
+      description?: string;
+      tags?: string[];
+    },
+  ) =>
+    request<BookShort>(bookPath(bookId, `/shorts/${index}`), {
+      method: "PATCH",
+      body: JSON.stringify(fields),
+    }),
+
+  removeShort: (bookId: string, index: number) =>
+    request<{ book_id: string; index: number }>(bookPath(bookId, `/shorts/${index}`), { method: "DELETE" }),
+
+  regenerateShort: (bookId: string, index: number) =>
+    request<BookShort>(bookPath(bookId, `/shorts/${index}/regenerate`), { method: "POST" }),
+
+  regenerateShortMetadata: (bookId: string, index: number) =>
+    request<BookShort>(bookPath(bookId, `/shorts/${index}/metadata`), { method: "POST" }),
+
+  renderShorts: (bookId: string, body: BookShortsRenderRequest) =>
+    request<RenderResult>(bookPath(bookId, "/shorts/render"), {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  renderShort: (bookId: string, index: number, body?: BookShortsRenderRequest) =>
+    request<RenderResult>(bookPath(bookId, `/shorts/${index}/render`), {
+      method: "POST",
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }),
+
   remove: (bookId: string) =>
     request<{ book_id: string; segments: number; cancelled: number }>(bookPath(bookId), { method: "DELETE" }),
 };
@@ -519,6 +687,15 @@ export interface BookEvent {
    * so neither the payload nor the browser accumulates a book-length transcript.
    */
   recent_logs?: BookLogLine[];
+  shorts?: {
+    state: BookShortsPlanState | "rendering";
+    revision: number;
+    chunks_total: number;
+    chunks_done: number;
+    counts: BookProgress;
+    items: { index: number; state: BookShortState }[];
+  };
+  shorts_logs?: { index: number; line: string }[];
 }
 
 /**
@@ -642,7 +819,7 @@ function zodIssues(detail: unknown): ZodIssueLike[] {
  */
 export function errorText(error: unknown, t: Translate): string {
   if (error instanceof ApiError) {
-    if (error.status === 409) return t("Book Busy Rendering");
+    if (error.status === 409) return error.message?.trim() || t("Book Busy Rendering");
     const issues = zodIssues(error.detail);
     if (issues.length > 0) {
       return issues

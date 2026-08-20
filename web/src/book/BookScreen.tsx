@@ -1,11 +1,11 @@
 /**
- * Workspace for one open book: import result, review, plan, render.
+ * Workspace for one open book: import result, review, plan, render, and shorts.
  *
- * The four panels are steps of one book, so this container owns the live
- * progress stream they all read from — a stream per panel would mean three
- * EventSources for one book. The selected book and step live in the URL so a
- * refresh or a shared link lands on the same screen. The library of all books
- * is a separate page; this one is named after the book at the top.
+ * The panels are views of one book, so this container owns the live progress
+ * stream they all read from — a stream per panel would mean several EventSources
+ * for one book. The selected book and step live in the URL so a refresh or a
+ * shared link lands on the same screen. The library of all books is a separate
+ * page; this one is named after the book at the top.
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -26,6 +26,7 @@ import { ImportPanel } from "./ImportPanel.tsx";
 import { ReviewPanel } from "./ReviewPanel.tsx";
 import { SegmentsPanel } from "./SegmentsPanel.tsx";
 import { RenderPanel } from "./RenderPanel.tsx";
+import { ShortsPanel } from "./ShortsPanel.tsx";
 import {
   bookApi,
   errorText,
@@ -38,9 +39,9 @@ import {
   type BookState,
 } from "./api.ts";
 
-type Step = "import" | "review" | "segments" | "render";
+type Step = "import" | "review" | "segments" | "render" | "shorts";
 
-const STEPS: Step[] = ["import", "review", "segments", "render"];
+const STEPS: Step[] = ["import", "review", "segments", "render", "shorts"];
 
 function isStep(value: string | undefined): value is Step {
   return STEPS.includes(value as Step);
@@ -214,6 +215,153 @@ function BookTitleEditor({
   );
 }
 
+/**
+ * The author shown under the title, and the control that changes it.
+ *
+ * Empty is allowed: clearing the field stops the first video announcing a
+ * leftover from the file's metadata. Locked while a render is in flight for
+ * the same reason as the title — the first segment is marked unrendered.
+ */
+function BookAuthorEditor({
+  bookId,
+  author,
+  locked,
+}: {
+  bookId: string;
+  author: string;
+  locked: boolean;
+}) {
+  const { t } = useI18n();
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(author);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const label = author || t("Book Unknown Author");
+
+  useEffect(() => {
+    if (!editing) setDraft(author);
+  }, [editing, author]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const saveAuthor = useMutation({
+    mutationFn: (next: string) => bookApi.patch(bookId, { author: next }),
+    onSuccess: (result) => {
+      setEditing(false);
+      queryClient.setQueryData(["book", bookId], (current: BookDetail | undefined) =>
+        current ? { ...current, book: { ...current.book, author: result.author } } : current,
+      );
+      queryClient.invalidateQueries({ queryKey: ["book", bookId] });
+      queryClient.invalidateQueries({ queryKey: ["books"] });
+    },
+  });
+
+  const close = () => {
+    setDraft(author);
+    setEditing(false);
+    saveAuthor.reset();
+  };
+
+  const save = () => {
+    if (draft.trim() === author) {
+      close();
+      return;
+    }
+    saveAuthor.mutate(draft.trim());
+  };
+
+  const startEdit = () => {
+    setDraft(author);
+    setEditing(true);
+  };
+
+  if (editing) {
+    return (
+      <form
+        className="w-full basis-full space-y-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          save();
+        }}
+      >
+        <div className="flex items-center gap-1.5">
+          <TextInput
+            ref={inputRef}
+            value={draft}
+            disabled={saveAuthor.isPending}
+            maxLength={300}
+            autoComplete="off"
+            aria-label={t("Book Author")}
+            placeholder={t("Book Edit Author Placeholder")}
+            className="h-8 min-w-0 flex-1 text-sm"
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && !saveAuthor.isPending) {
+                event.preventDefault();
+                close();
+              }
+            }}
+          />
+          <Button
+            type="submit"
+            size="sm"
+            variant="primary"
+            disabled={saveAuthor.isPending}
+            title={t("Save")}
+            aria-label={t("Save")}
+          >
+            {saveAuthor.isPending ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={saveAuthor.isPending}
+            title={t("Cancel")}
+            aria-label={t("Cancel")}
+            onClick={close}
+          >
+            <X size={14} />
+          </Button>
+        </div>
+        {saveAuthor.isError && (
+          <Alert tone={isRenderConflict(saveAuthor.error) ? "warning" : "danger"}>
+            {errorText(saveAuthor.error, t)}
+          </Alert>
+        )}
+      </form>
+    );
+  }
+
+  return (
+    <span className="inline-flex min-w-0 max-w-full items-center gap-0.5">
+      <button
+        type="button"
+        disabled={locked}
+        className="min-w-0 truncate text-left disabled:cursor-not-allowed"
+        title={locked ? t("Book Edit Author Locked") : t("Book Edit Author")}
+        onClick={startEdit}
+      >
+        {label}
+      </button>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="h-6 w-6 shrink-0 p-0"
+        disabled={locked}
+        title={locked ? t("Book Edit Author Locked") : t("Book Edit Author")}
+        aria-label={locked ? t("Book Edit Author Locked") : t("Book Edit Author")}
+        onClick={startEdit}
+      >
+        <Pencil size={12} />
+      </Button>
+    </span>
+  );
+}
+
 export function BookScreen() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
@@ -236,7 +384,16 @@ export function BookScreen() {
     // the moment the last one dies is how a dead render keeps looking alive.
     refetchInterval: (query) => {
       const counts = query.state.data?.progress;
-      return streamFailed && counts && counts.queued + counts.rendering > 0 ? 3000 : false;
+      const shortsPlan = query.state.data?.book.shorts?.state;
+      const planning = shortsPlan === "planning";
+      const segmentBusy = Boolean(counts && counts.queued + counts.rendering > 0);
+      const youtubeBusy = Boolean(
+        query.state.data?.segments.some(
+          (segment) => segment.youtube_upload_state === "pending" || segment.youtube_upload_state === "processing",
+        ),
+      );
+      if (youtubeBusy) return 3000;
+      return streamFailed && (segmentBusy || planning) ? 3000 : false;
     },
   });
 
@@ -247,20 +404,33 @@ export function BookScreen() {
     if (!bookId) return;
 
     let lastComplete: number | null = null;
+    let lastShortComplete: number | null = null;
+    let lastShortsPlanState: string | null = null;
     let sawRendering = false;
     const refresh = () => {
       queryClient.invalidateQueries({ queryKey: ["book", bookId] });
       queryClient.invalidateQueries({ queryKey: ["books"] });
+      queryClient.invalidateQueries({ queryKey: ["book-shorts", bookId] });
     };
 
     return subscribeToBook(bookId, {
       onProgress: (event) => {
         setProgress(event);
-        if (event.state === "rendering") sawRendering = true;
+        if (event.state === "rendering" || event.shorts?.state === "planning" || event.shorts?.state === "rendering") {
+          sawRendering = true;
+        }
         // A finished segment has URLs the projection does not carry, so the
         // full document is refetched only when one actually lands.
         if (lastComplete !== null && event.counts.complete !== lastComplete) refresh();
         lastComplete = event.counts.complete;
+        const shortComplete = event.shorts?.counts.complete;
+        if (lastShortComplete !== null && shortComplete !== undefined && shortComplete !== lastShortComplete) {
+          refresh();
+        }
+        if (shortComplete !== undefined) lastShortComplete = shortComplete;
+        const planState = event.shorts?.state ?? null;
+        if (lastShortsPlanState === "planning" && planState !== "planning") refresh();
+        lastShortsPlanState = planState;
       },
       onDone: (event) => {
         setProgress(event);
@@ -349,13 +519,21 @@ export function BookScreen() {
                 ) : (
                   <h2 className="truncate text-2xl font-semibold tracking-tight">{t("Book Untitled")}</h2>
                 )}
-                <p className="mt-1 truncate text-sm text-muted">
-                  {detail?.book.author || t("Book Unknown Author")} ·{" "}
-                  {t("Book Kept Of Blocks", {
-                    kept: detail?.book.kept_block_count ?? 0,
-                    total: detail?.book.block_count ?? 0,
-                  })}{" "}
-                  · {t("Book Revision", { revision: detail?.book.revision ?? 0 })}
+                <p className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 text-sm text-muted">
+                  {detail ? (
+                    <BookAuthorEditor bookId={bookId} author={detail.book.author} locked={renderingActive} />
+                  ) : (
+                    t("Book Unknown Author")
+                  )}
+                  <span>·</span>
+                  <span>
+                    {t("Book Kept Of Blocks", {
+                      kept: detail?.book.kept_block_count ?? 0,
+                      total: detail?.book.block_count ?? 0,
+                    })}
+                  </span>
+                  <span>·</span>
+                  <span>{t("Book Revision", { revision: detail?.book.revision ?? 0 })}</span>
                 </p>
               </>
             )}
@@ -402,6 +580,7 @@ export function BookScreen() {
           <TabTrigger value="review">{t("Book Step Review")}</TabTrigger>
           <TabTrigger value="segments">{t("Book Step Segments")}</TabTrigger>
           <TabTrigger value="render">{t("Book Step Render")}</TabTrigger>
+          <TabTrigger value="shorts">{t("Book Step Shorts")}</TabTrigger>
         </TabsList>
 
         <TabContent value="import">
@@ -431,6 +610,16 @@ export function BookScreen() {
             streamFailed={streamFailed}
             renderingActive={renderingActive}
             onRenderStarted={() => setStreamEpoch((current) => current + 1)}
+          />
+        </TabContent>
+
+        <TabContent value="shorts">
+          <ShortsPanel
+            bookId={bookId}
+            detail={detail}
+            progress={live}
+            streamFailed={streamFailed}
+            onWorkStarted={() => setStreamEpoch((current) => current + 1)}
           />
         </TabContent>
       </Tabs>

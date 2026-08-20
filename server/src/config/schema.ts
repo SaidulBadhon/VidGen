@@ -129,6 +129,17 @@ export const appSettingsSchema = z.object({
     .enum(["public", "unlisted", "private"])
     .default("public"),
   upload_post_max_pending_tasks: z.number().int().min(1).default(10),
+
+  // --- Direct YouTube Data API ---------------------------------------------
+  google_client_id: z.string().default(""),
+  google_client_secret: z.string().default(""),
+  youtube_privacy_status: z.enum(["public", "unlisted", "private"]).default("unlisted"),
+  /**
+   * Hours between auto-uploaded videos' YouTube publish times. 0 keeps the
+   * default privacy and publishes immediately. 6 (the default) uploads files
+   * one after another and schedules each public release six hours after the last.
+   */
+  youtube_auto_schedule_hours: z.number().int().min(0).max(168).default(6),
 });
 
 export const whisperSettingsSchema = z.object({
@@ -261,6 +272,7 @@ export const SECRET_FIELDS: ReadonlyArray<[SettingsSection, string]> = [
   ["app", "gemma_api_key"],
   ["app", "mimo_api_key"],
   ["app", "upload_post_api_key"],
+  ["app", "google_client_secret"],
   ["whisper", "api_key"],
   ["azure", "speech_key"],
   ["siliconflow", "api_key"],

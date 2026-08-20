@@ -11,7 +11,7 @@
  * python-version/app/services/task.py, widened to cover generation too.
  */
 
-import { booksCollection, bookSegmentsCollection, tasksCollection } from "../db/client.ts";
+import { booksCollection, bookSegmentsCollection, bookShortsCollection, tasksCollection } from "../db/client.ts";
 import { syncBookState } from "../db/books.ts";
 import {
   CROSS_POST_STATE_FAILED,
@@ -20,17 +20,21 @@ import {
   TASK_STATE_FAILED,
   TASK_STATE_PROCESSING,
 } from "../models/const.ts";
-import { logger } from "../utils/logger.ts";
+import { logger, errorMessage } from "../utils/logger.ts";
 import { isOwnerAlive } from "./owner.ts";
 
 const INTERRUPTED_GENERATION_ERROR = "generation was interrupted before the process completed";
 const INTERRUPTED_CROSS_POST_ERROR = "cross-posting was interrupted before the process completed";
 const INTERRUPTED_SEGMENT_ERROR = "the segment render was interrupted before the process completed";
+const INTERRUPTED_SHORT_ERROR = "the short render was interrupted before the process completed";
+const INTERRUPTED_SHORTS_PLAN_ERROR = "short planning was interrupted before the process completed";
 
 export interface RecoveryResult {
   generation: number;
   crossPost: number;
+  youtubeUpload: number;
   bookSegments: number;
+  bookShorts: number;
   /** Books whose remaining segments were handed back to the queue. */
   booksResumed: number;
   segmentsResumed: number;
@@ -41,7 +45,9 @@ export async function recoverInterruptedTasks(): Promise<RecoveryResult> {
   const result: RecoveryResult = {
     generation: 0,
     crossPost: 0,
+    youtubeUpload: 0,
     bookSegments: 0,
+    bookShorts: 0,
     booksResumed: 0,
     segmentsResumed: 0,
   };
@@ -101,6 +107,16 @@ export async function recoverInterruptedTasks(): Promise<RecoveryResult> {
   // whose task was just failed for a dead owner is failed here in the same
   // sweep, without repeating the liveness check.
   result.bookSegments = await recoverInterruptedBookSegments();
+  result.bookShorts = await recoverInterruptedBookShorts();
+
+  // After generation is settled: a finished video file can be uploaded again,
+  // unlike a mid-ffmpeg render. Includes rows an older recovery already marked
+  // failed with the interrupted message.
+  const { resumeInterruptedYoutubeUploads, queueUnpublishedAutoYoutubeUploads } = await import("./youtubeUpload.ts");
+  result.youtubeUpload = await resumeInterruptedYoutubeUploads();
+  await queueUnpublishedAutoYoutubeUploads().catch((error) => {
+    logger.warning(`YouTube unpublished auto-upload sweep failed: ${errorMessage(error)}`);
+  });
 
   // Strictly last: resuming reads the segment states the two passes above have
   // just settled, so a segment failed a moment ago for a dead owner is picked
@@ -109,10 +125,14 @@ export async function recoverInterruptedTasks(): Promise<RecoveryResult> {
   result.booksResumed = resumed.books;
   result.segmentsResumed = resumed.segments;
 
-  if (result.generation || result.crossPost || result.bookSegments) {
+  if (result.youtubeUpload) {
+    logger.success(`resumed ${result.youtubeUpload} interrupted YouTube upload(s)`);
+  }
+  if (result.generation || result.crossPost || result.bookSegments || result.bookShorts) {
     logger.warning(
       `recovered interrupted tasks: generation=${result.generation}, ` +
-        `cross_post=${result.crossPost}, book_segments=${result.bookSegments}`,
+        `cross_post=${result.crossPost}, ` +
+        `book_segments=${result.bookSegments}, book_shorts=${result.bookShorts}`,
     );
   }
   if (result.booksResumed) {
@@ -169,6 +189,72 @@ export async function recoverInterruptedBookSegments(): Promise<number> {
 
   for (const bookId of affectedBooks) {
     await syncBookState(bookId);
+  }
+
+  return recovered;
+}
+
+/**
+ * Fails hook shorts and in-flight planning whose owning task did not survive.
+ *
+ * Same reason as segments: a short is not a task, so the generation sweep never
+ * touches it, and a planning banner that never clears would lock the Shorts tab.
+ * Unlike chapter renders these are cheap to retry, so they are failed rather
+ * than handed back to the queue.
+ */
+export async function recoverInterruptedBookShorts(): Promise<number> {
+  const shorts = bookShortsCollection();
+  const books = booksCollection();
+  const tasks = tasksCollection();
+  let recovered = 0;
+
+  const candidates = await shorts
+    .find(
+      { state: { $in: ["queued", "rendering"] } },
+      { projection: { _id: 1, book_id: 1, index: 1, task_id: 1 } },
+    )
+    .toArray();
+
+  for (const short of candidates) {
+    const task = short.task_id
+      ? await tasks.findOne({ _id: short.task_id }, { projection: { state: 1, owner_id: 1 } })
+      : null;
+    const alive =
+      task !== null && task.state === TASK_STATE_PROCESSING && isOwnerAlive(task.owner_id);
+    if (alive) continue;
+
+    await shorts.updateOne(
+      { _id: short._id },
+      { $set: { state: "failed", error: INTERRUPTED_SHORT_ERROR, updated_at: new Date() } },
+    );
+    recovered += 1;
+  }
+
+  const planning = await books
+    .find({ "shorts.state": "planning" }, { projection: { _id: 1, shorts: 1 } })
+    .toArray();
+
+  for (const book of planning) {
+    const taskId = book.shorts?.task_id;
+    const task = taskId
+      ? await tasks.findOne({ _id: taskId }, { projection: { state: 1, owner_id: 1 } })
+      : null;
+    const alive =
+      task !== null && task.state === TASK_STATE_PROCESSING && isOwnerAlive(task.owner_id);
+    if (alive) continue;
+
+    await books.updateOne(
+      { _id: book._id },
+      {
+        $set: {
+          "shorts.state": "failed",
+          "shorts.error": INTERRUPTED_SHORTS_PLAN_ERROR,
+          "shorts.finished_at": new Date(),
+          updated_at: new Date(),
+        },
+      },
+    );
+    recovered += 1;
   }
 
   return recovered;

@@ -13,9 +13,13 @@ import type {
   BookDecisionDocument,
   BookDocument,
   BookSegmentDocument,
+  BookShortDocument,
   MaterialCacheDocument,
   SettingsDocument,
   TaskDocument,
+  YoutubeChannelDocument,
+  YoutubeOAuthStateDocument,
+  YoutubeScheduleDocument,
 } from "./types.ts";
 
 const MONGODB_URI = process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017";
@@ -56,6 +60,19 @@ async function createIndexes(database: Db): Promise<void> {
 
   await database.collection<BookBlockEditDocument>("book_block_edits").createIndexes([
     { key: { book_id: 1 }, name: "book_id" },
+  ]);
+
+  await database.collection<BookShortDocument>("book_shorts").createIndexes([
+    { key: { book_id: 1, index: 1 }, name: "book_id_index" },
+  ]);
+
+  await database.collection<YoutubeChannelDocument>("youtube_channels").createIndexes([
+    { key: { channel_id: 1 }, name: "channel_id_unique", unique: true },
+    { key: { created_at: 1 }, name: "created_at" },
+  ]);
+
+  await database.collection<YoutubeOAuthStateDocument>("youtube_oauth_states").createIndexes([
+    { key: { expires_at: 1 }, name: "expires_at_ttl", expireAfterSeconds: 0 },
   ]);
 }
 
@@ -130,6 +147,22 @@ export function bookDecisionsCollection(): Collection<BookDecisionDocument> {
 
 export function bookBlockEditsCollection(): Collection<BookBlockEditDocument> {
   return requireDb().collection<BookBlockEditDocument>("book_block_edits");
+}
+
+export function bookShortsCollection(): Collection<BookShortDocument> {
+  return requireDb().collection<BookShortDocument>("book_shorts");
+}
+
+export function youtubeChannelsCollection(): Collection<YoutubeChannelDocument> {
+  return requireDb().collection<YoutubeChannelDocument>("youtube_channels");
+}
+
+export function youtubeOAuthStatesCollection(): Collection<YoutubeOAuthStateDocument> {
+  return requireDb().collection<YoutubeOAuthStateDocument>("youtube_oauth_states");
+}
+
+export function youtubeScheduleCollection(): Collection<YoutubeScheduleDocument> {
+  return requireDb().collection<YoutubeScheduleDocument>("youtube_schedule");
 }
 
 export function isConnected(): boolean {

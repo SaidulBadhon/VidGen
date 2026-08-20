@@ -35,7 +35,9 @@ import { preprocessVideos } from "../services/video/preprocess.ts";
 import { combineVideos } from "../services/video/combine.ts";
 import { generateVideo } from "../services/video/generate.ts";
 import { writeScriptData } from "../services/taskArtifacts.ts";
+import { BOOK_SHORT_REQUEST_PREFIX } from "../services/book/shorts.ts";
 import { scheduleCrossPost } from "./crossPost.ts";
+import { scheduleAutoYoutubeUpload } from "./youtubeUpload.ts";
 import { PROCESS_OWNER_ID } from "./owner.ts";
 import { appendTaskLog, getTask, updateTask } from "./state.ts";
 import type { TaskWarning } from "../db/types.ts";
@@ -460,6 +462,24 @@ async function executePipeline(
     }
   }
 
+  const isBookShort = String((await getTask(taskId))?.request_id ?? "").startsWith(BOOK_SHORT_REQUEST_PREFIX);
+  if (!isBookShort) {
+    const youtubeError = await scheduleAutoYoutubeUpload({
+      taskId,
+      videoPaths: finalVideoPaths,
+      videoSubject: params.video_subject || "",
+      videoScript,
+      videoLanguage: params.video_language || "",
+    });
+    if (youtubeError) {
+      await updateTask(taskId, {
+        youtube_upload_state: CROSS_POST_STATE_FAILED,
+        youtube_upload_error: youtubeError,
+        youtube_upload_owner: null,
+      });
+    }
+  }
+
   return {
     script: videoScript,
     terms: videoTerms,
@@ -578,12 +598,16 @@ async function generateFinalVideos(options: {
 }
 
 /** True while generation or publishing may still touch the task directory. */
-export function isTaskBusy(task: { state?: number; cross_post_state?: string | null } | null): boolean {
+export function isTaskBusy(
+  task: { state?: number; cross_post_state?: string | null; youtube_upload_state?: string | null } | null,
+): boolean {
   if (!task) return false;
   return (
     task.state === TASK_STATE_PROCESSING ||
     task.cross_post_state === "pending" ||
-    task.cross_post_state === "processing"
+    task.cross_post_state === "processing" ||
+    task.youtube_upload_state === "pending" ||
+    task.youtube_upload_state === "processing"
   );
 }
 

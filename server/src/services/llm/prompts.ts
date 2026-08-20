@@ -184,7 +184,7 @@ export interface SocialPlatformSpec {
 /** Conservative per-platform limits so callers never need to re-trim. */
 export const SOCIAL_PLATFORMS: Record<string, SocialPlatformSpec> = {
   tiktok: { titleMax: 100, captionMax: 2200, hashtagCount: 5 },
-  youtube_shorts: { titleMax: 100, captionMax: 5000, hashtagCount: 3 },
+  youtube_shorts: { titleMax: 100, captionMax: 5000, hashtagCount: 6 },
   instagram_reels: { titleMax: 125, captionMax: 2200, hashtagCount: 8 },
   facebook_reels: { titleMax: 125, captionMax: 2200, hashtagCount: 5 },
 };
@@ -286,6 +286,11 @@ export function buildSocialMetadataPrompt(options: {
   const spec = SOCIAL_PLATFORMS[platform]!;
   const label = SOCIAL_PLATFORM_LABELS[platform] ?? platform;
 
+  const captionRule =
+    platform === "youtube_shorts"
+      ? `"caption": a full YouTube video description (not a one-line social caption). Write 4-8 short paragraphs, aiming for 600-2500 characters and at most ${spec.captionMax}. Structure: (1) opening hook, (2) what happens in the video, (3) why it matters or the key takeaway, (4) call to action to watch, like, or subscribe. Do not put hashtags in the body; end with a blank line and a final line of 4-6 hashtags including #shorts.`
+      : `"caption": an engaging description that ends with a call to action, at most ${spec.captionMax} characters. Do not put hashtags inside the caption.`;
+
   return `# Role: Short-Video Social Media Copywriter
 
 ## Goal
@@ -295,7 +300,7 @@ Write engaging publishing metadata for a short video that will be posted on ${la
 1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
 2. The JSON must contain exactly these keys: "title", "caption", "hashtags".
 3. "title": a catchy hook, at most ${spec.titleMax} characters.
-4. "caption": an engaging description that ends with a call to action, at most ${spec.captionMax} characters. Do not put hashtags inside the caption.
+4. ${captionRule}
 5. "hashtags": a JSON array of exactly ${spec.hashtagCount} strings. Each must start with "#", contain no spaces, and be relevant to the topic and to ${label}.
 6. ${socialLanguageInstruction(options.language)}
 
@@ -387,6 +392,294 @@ ${lines}
 
 ## Output Example
 {"skip_block_ids":["${exampleId}"],"sections":[{"start_block_id":"${exampleId}","title":"I. The Period"}]}`;
+}
+
+// ---------------------------------------------------------------------------
+// Book hook shorts
+// ---------------------------------------------------------------------------
+
+export interface BookShortPassageLine {
+  blockId: string;
+  kind: string;
+  text: string;
+}
+
+export function buildBookShortsPrompt(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  targetSeconds: number;
+  targetWords: number;
+  chunkIndex: number;
+  chunkCount: number;
+  lines: BookShortPassageLine[];
+}): string {
+  const title = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const language = (options.language || "").trim();
+  const languageName = languageLabel(language);
+  const exampleId = options.lines[0]?.blockId ?? "0:0";
+  const passage = options.lines
+    .map((line) => `[${line.blockId} ${line.kind}] ${line.text}`)
+    .join("\n");
+
+  return `# Role: Viral Book-Trailer Writer for YouTube Shorts and TikTok
+
+## Goal
+Write spoken scripts for ${options.targetSeconds}-second portrait videos that hook a scroller into watching the full book video of "${title}". Each script is a funny, surprising, or emotionally sharp beat taken from THIS passage only — not a summary of the whole book.
+
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must be: {"shorts":[{"title":"...","hook":"...","script":"...","start_block_id":"..."}]}
+3. Return 0 or 1 short. Return {"shorts":[]} when this passage is apparatus (contents, copyright, index) or has no hook-worthy moment.
+4. Every start_block_id MUST be copied exactly from a [id kind] tag in the passage. Do not invent ids.
+5. "title": a catchy on-screen title, at most 80 characters, no quotes around the whole title.
+6. "hook": the first 1-2 spoken sentences, at most 220 characters. It must stop the scroll in the first 3 seconds — a question, a contradiction, a laugh, or a gut-punch. Not "in this book" or "today we".
+7. "script": the full spoken narration, about ${options.targetWords} words (range ${Math.max(80, options.targetWords - 30)}-${options.targetWords + 30}). No markdown, no titles, no "voiceover", no "subscribe", no "in this video". Write as a storyteller talking to camera.
+8. Tell one self-contained beat from this passage, then leave a question or unfinished turn so the viewer wants the rest of the story. Do not spoil the book's ending or later reveals.
+9. Prefer funny, ironic, romantic, or high-stakes moments over plot summary. A joke that is true to the scene beats a Wikipedia recap.
+10. ${languageName ? `Write title, hook and script entirely in ${languageName}.` : "Write in the same language as the passage."}
+11. This is passage ${options.chunkIndex} of ${options.chunkCount}. Only use what is in the passage below.
+
+## Book
+- title: ${title}${author ? `\n- author: ${author}` : ""}${languageName ? `\n- language: ${languageName}` : ""}
+- chapter or section: ${options.chapterTitle || "Untitled"}
+
+## Passage
+${passage}
+
+## Output Example
+{"shorts":[{"title":"She said yes. Then she saw the list.","hook":"She said yes. Then she saw the list.","script":"She said yes. Then she saw the list. ${title} is about to get much worse.","start_block_id":"${exampleId}"}]}`;
+}
+
+export function buildBookShortRegenPrompt(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  title: string;
+  hook: string;
+  previousScript?: string;
+  targetSeconds: number;
+  targetWords: number;
+  excerpt: string;
+}): string {
+  const title = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const languageName = languageLabel((options.language || "").trim());
+  const previous = (options.previousScript || "").trim();
+
+  return `# Role: Viral Book-Trailer Writer for YouTube Shorts and TikTok
+
+## Goal
+Rewrite the spoken script for a ${options.targetSeconds}-second portrait video that hooks a scroller into watching the full book video of "${title}". Keep the same story beat. Make it funnier or sharper than the previous draft if there is one.
+
+## Constraints
+1. Return ONLY the spoken script as plain text. No markdown, no title, no JSON, no "voiceover".
+2. About ${options.targetWords} words (range ${Math.max(80, options.targetWords - 30)}-${options.targetWords + 30}).
+3. Open with a hook in the first sentence. End on a curiosity gap. Do not spoil the ending.
+4. Use only facts from the excerpt. Do not invent plot.
+5. ${languageName ? `Write the entire script in ${languageName}.` : "Write in the same language as the excerpt."}
+
+## Book
+- title: ${title}${author ? `\n- author: ${author}` : ""}
+- chapter: ${options.chapterTitle || "Untitled"}
+- short title: ${options.title}
+- hook: ${options.hook}
+${previous ? `\n## Previous script\n${previous}\n` : ""}
+## Excerpt
+${options.excerpt}`;
+}
+
+// ---------------------------------------------------------------------------
+// Book-short YouTube listing
+// ---------------------------------------------------------------------------
+
+export const YOUTUBE_SHORT_TITLE_MAX = 100;
+export const YOUTUBE_SHORT_DESCRIPTION_MAX = 5000;
+export const YOUTUBE_SHORT_TAG_COUNT = 12;
+export const YOUTUBE_SHORT_TAG_MAX = 100;
+export const YOUTUBE_SHORT_TAGS_MAX_CHARS = 500;
+
+/**
+ * Turns model-supplied keywords into YouTube tags.
+ *
+ * YouTube wants phrases, not hashtags: spaces are allowed, `#` is stripped,
+ * and the combined length is capped so the Data API does not reject the set.
+ */
+export function normalizeYoutubeTags(raw: unknown, count = YOUTUBE_SHORT_TAG_COUNT): string[] {
+  let candidates: string[] = [];
+  if (typeof raw === "string") {
+    candidates = raw.split(/[,;\n]+/);
+  } else if (Array.isArray(raw)) {
+    candidates = raw.map((entry) => String(entry));
+  }
+
+  const seen = new Set<string>();
+  const result: string[] = [];
+  let used = 0;
+  for (const item of candidates) {
+    const tag = item
+      .replace(/^#+/, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, YOUTUBE_SHORT_TAG_MAX)
+      .trim();
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    if (used + tag.length > YOUTUBE_SHORT_TAGS_MAX_CHARS) continue;
+    seen.add(key);
+    result.push(tag);
+    used += tag.length + 1;
+    if (count && result.length >= count) break;
+  }
+  return result;
+}
+
+export function fallbackBookShortPublish(options: {
+  bookTitle: string;
+  author: string;
+  title: string;
+  hook: string;
+  script: string;
+}): { youtubeTitle: string; description: string; tags: string[] } {
+  const bookTitle = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const clipTitle = (options.title || "").trim();
+  const hook = (options.hook || "").trim();
+  const script = (options.script || "").trim();
+
+  const youtubeTitle = clampText(
+    clipTitle || hook || script.split(/[.。!！?？\n]/)[0] || bookTitle,
+    YOUTUBE_SHORT_TITLE_MAX,
+  );
+
+  const tease = hook || clampText(script, 280);
+  const credit = author ? `"${bookTitle}" by ${author}` : `"${bookTitle}"`;
+  const description = clampText(
+    [tease, "", `A teaser from ${credit}. Watch the full book video.`, "", "#shorts #books #audiobook"]
+      .filter((line) => line !== undefined)
+      .join("\n"),
+    YOUTUBE_SHORT_DESCRIPTION_MAX,
+  );
+
+  const tags = normalizeYoutubeTags(
+    [bookTitle, author, "audiobook", "booktok", "shorts", "book trailer", clipTitle].filter(Boolean),
+    YOUTUBE_SHORT_TAG_COUNT,
+  );
+
+  return { youtubeTitle, description, tags };
+}
+
+export function buildBookShortPublishPrompt(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  title: string;
+  hook: string;
+  script: string;
+}): string {
+  const bookTitle = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const languageName = languageLabel((options.language || "").trim());
+  const clipTitle = clampText(options.title, MAX_SOCIAL_SUBJECT_LENGTH);
+  const hook = clampText(options.hook, 400);
+  const script = clampText(options.script, MAX_SOCIAL_SCRIPT_LENGTH);
+
+  return `# Role: YouTube Shorts Listing Writer for book trailers
+
+## Goal
+Write the YouTube listing for a ~60 second book-trailer Short that pulls a scroller into watching the full book video of "${bookTitle}". This is publishing metadata, not the spoken script.
+
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must be: {"youtube_title":"...","description":"...","tags":["..."]}
+3. "youtube_title": catchy, at most ${YOUTUBE_SHORT_TITLE_MAX} characters. It may mention the book. Do not wrap the whole title in quotes.
+4. "description": a full YouTube description — 4-8 short paragraphs, aiming for 800-2500 characters and at most ${YOUTUBE_SHORT_DESCRIPTION_MAX}. Structure: (1) scroll-stopping hook, (2) what this teaser shows from the chapter, (3) a sentence about the book${author ? " and author" : ""} without spoiling later chapters, (4) why someone should watch the full book video, (5) a clear call to action. Do not put hashtags in the body; end with a blank line and a final line of 4-6 hashtags including #shorts.
+5. "tags": a JSON array of ${YOUTUBE_SHORT_TAG_COUNT} keyword strings for YouTube's tags field. No leading "#", spaces inside a tag are allowed (e.g. the book title). Include the book title, ${author ? "the author, " : ""}audiobook, and topic words from this teaser.
+6. ${languageName ? `Write youtube_title and description in ${languageName}.` : "Write youtube_title and description in the same language as the script."} Tags may mix that language with common English discovery terms such as audiobook and shorts.
+
+## Book
+- title: ${bookTitle}${author ? `\n- author: ${author}` : ""}${languageName ? `\n- language: ${languageName}` : ""}
+- chapter or section: ${options.chapterTitle || "Untitled"}
+
+## Teaser
+- on-screen title: ${clipTitle}
+- opening hook: ${hook}
+
+## Spoken script
+${script}
+
+## Output Example
+{"youtube_title":"...","description":"...\\n\\n#shorts #books","tags":["${bookTitle.replace(/"/g, "")}","audiobook"]}`;
+}
+
+export function fallbackBookSegmentPublish(options: {
+  bookTitle: string;
+  author: string;
+  chapterTitle: string;
+  /** 1-based episode number; omitted keeps the chapter title unsuffixed. */
+  episode?: number;
+}): { youtubeTitle: string; description: string; tags: string[] } {
+  const bookTitle = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const chapter = (options.chapterTitle || "Chapter").trim();
+  const base = bookTitle === chapter ? bookTitle : `${bookTitle} - ${chapter}`;
+  const suffixed =
+    options.episode != null && options.episode > 0 ? `${base} | Episode ${options.episode}` : base;
+  const youtubeTitle = clampText(
+    suffixed.replace(/\s*[\u2014\u2013]\s*/g, " - ").replace(/\s+/g, " ").trim(),
+    YOUTUBE_SHORT_TITLE_MAX,
+  );
+  const credit = author ? `"${bookTitle}" by ${author}` : `"${bookTitle}"`;
+  const description = clampText(
+    [chapter, "", `From ${credit}.`, "", "#audiobook #books"].join("\n"),
+    YOUTUBE_SHORT_DESCRIPTION_MAX,
+  );
+  const tags = normalizeYoutubeTags(
+    [bookTitle, author, chapter, "audiobook", "books"].filter(Boolean),
+    YOUTUBE_SHORT_TAG_COUNT,
+  );
+  return { youtubeTitle, description, tags };
+}
+
+export function buildBookSegmentPublishPrompt(options: {
+  bookTitle: string;
+  author: string;
+  language?: string;
+  chapterTitle: string;
+  excerpt: string;
+}): string {
+  const bookTitle = (options.bookTitle || "Untitled").trim();
+  const author = (options.author || "").trim();
+  const languageName = languageLabel((options.language || "").trim());
+  const chapter = clampText(options.chapterTitle, MAX_SOCIAL_SUBJECT_LENGTH);
+  const excerpt = clampText(options.excerpt, MAX_SOCIAL_SCRIPT_LENGTH);
+
+  return `# Role: YouTube Listing Writer for audiobook chapters
+
+## Goal
+Write the YouTube description and tags for a long-form chapter video from the audiobook of "${bookTitle}". This is publishing metadata, not the spoken narration. Do not write a title — the chapter name is already set.
+
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must be: {"description":"...","tags":["..."]}
+3. "description": a full YouTube chapter description — 5-10 short paragraphs, aiming for 1000-3500 characters and at most ${YOUTUBE_SHORT_DESCRIPTION_MAX}. Structure: (1) hook or mood-setting opener, (2) what this chapter covers using the excerpt, (3) how it fits the story so far without spoiling later chapters, (4) a line about the book${author ? " and author" : ""}, (5) why listeners should keep watching the playlist, (6) subscribe / next-chapter call to action. Do not put hashtags in the body; end with a blank line and a final line of 4-6 hashtags including #audiobook. This is NOT a YouTube Short — do not use #shorts.
+4. "tags": a JSON array of ${YOUTUBE_SHORT_TAG_COUNT} keyword strings for YouTube's tags field. No leading "#", spaces inside a tag are allowed. Include the book title, ${author ? "the author, " : ""}audiobook, and topic words from this chapter.
+5. ${languageName ? `Write the description in ${languageName}.` : "Write the description in the same language as the excerpt."} Tags may mix that language with common English discovery terms such as audiobook.
+
+## Book
+- title: ${bookTitle}${author ? `\n- author: ${author}` : ""}${languageName ? `\n- language: ${languageName}` : ""}
+- chapter or section: ${chapter || "Untitled"}
+
+## Excerpt
+${excerpt || chapter}
+
+## Output Example
+{"description":"...\\n\\n#audiobook #books","tags":["${bookTitle.replace(/"/g, "")}","audiobook"]}`;
 }
 
 /** Structured metadata used when the model is unavailable or unusable. */

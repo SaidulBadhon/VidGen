@@ -23,6 +23,7 @@ import {
   bookBlockEditsCollection,
   bookDecisionsCollection,
   bookSegmentsCollection,
+  bookShortsCollection,
   booksCollection,
 } from "./client.ts";
 import type {
@@ -31,6 +32,7 @@ import type {
   BookDocument,
   BookSegmentDocument,
   BookSegmentState,
+  BookShortDocument,
   BookState,
 } from "./types.ts";
 import { classifyBlocks } from "../services/book/filter/structural.ts";
@@ -205,6 +207,7 @@ export async function deleteBook(bookId: string): Promise<void> {
     bookSegmentsCollection().deleteMany({ book_id: bookId }),
     bookDecisionsCollection().deleteMany({ book_id: bookId }),
     bookBlockEditsCollection().deleteMany({ book_id: bookId }),
+    bookShortsCollection().deleteMany({ book_id: bookId }),
   ]);
 }
 
@@ -315,6 +318,79 @@ export async function replaceBookSegments(
 
   await bookSegmentsCollection().insertMany(documents);
   return documents;
+}
+
+// ---------------------------------------------------------------------------
+// Hook shorts
+// ---------------------------------------------------------------------------
+
+/** Composite `_id` for a hook short. Same shape as a segment, different collection. */
+export function shortDocId(bookId: string, index: number): string {
+  return segmentDocId(bookId, index);
+}
+
+export type BookShortUpsert = Omit<BookShortDocument, "_id" | "updated_at">;
+
+export async function getBookShort(bookId: string, index: number): Promise<BookShortDocument | null> {
+  return bookShortsCollection().findOne({ _id: shortDocId(bookId, index) });
+}
+
+export async function listBookShorts(bookId: string): Promise<BookShortDocument[]> {
+  return bookShortsCollection().find({ book_id: bookId }).sort({ index: 1 }).toArray();
+}
+
+export type BookShortPatch = Partial<Omit<BookShortDocument, "_id" | "book_id" | "index">>;
+
+export async function patchBookShort(
+  bookId: string,
+  index: number,
+  fields: BookShortPatch,
+): Promise<boolean> {
+  const update = stripUndefined(fields);
+  if (Object.keys(update).length === 0) return false;
+
+  const result = await bookShortsCollection().updateOne(
+    { _id: shortDocId(bookId, index) },
+    { $set: { ...update, updated_at: new Date() } },
+  );
+  return result.matchedCount > 0;
+}
+
+export async function deleteBookShorts(bookId: string): Promise<void> {
+  await bookShortsCollection().deleteMany({ book_id: bookId });
+}
+
+/** Drops one idea. True when a row existed. */
+export async function deleteBookShort(bookId: string, index: number): Promise<boolean> {
+  const result = await bookShortsCollection().deleteOne({ _id: shortDocId(bookId, index) });
+  return result.deletedCount > 0;
+}
+
+/** Replaces the whole shorts plan in one pass, so no leftover of the old ideas survives. */
+export async function replaceBookShorts(
+  bookId: string,
+  shorts: BookShortUpsert[],
+): Promise<BookShortDocument[]> {
+  await deleteBookShorts(bookId);
+  if (shorts.length === 0) return [];
+
+  const now = new Date();
+  const documents: BookShortDocument[] = shorts.map((short) => ({
+    _id: shortDocId(short.book_id, short.index),
+    ...short,
+    updated_at: now,
+  }));
+
+  await bookShortsCollection().insertMany(documents);
+  return documents;
+}
+
+/** Reads a book's shorts and derives the same aggregate shape segments use. */
+export async function bookShortsProgress(bookId: string): Promise<BookProgress> {
+  const shorts = await bookShortsCollection()
+    .find({ book_id: bookId }, { projection: { state: 1 } })
+    .toArray();
+  return aggregateSegmentProgress(shorts);
 }
 
 // ---------------------------------------------------------------------------

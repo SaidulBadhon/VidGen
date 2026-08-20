@@ -28,6 +28,65 @@ export interface CrossPostResult {
   [key: string]: unknown;
 }
 
+export interface YoutubeUploadResult {
+  success: boolean;
+  channel_id: string;
+  channel_title: string;
+  video_id?: string;
+  video_url?: string;
+  error?: string;
+  playlist_id?: string;
+  playlist_error?: string;
+}
+
+/**
+ * Enough to restart an in-flight upload after the process dies.
+ * Tokens stay on the channel document; this is only listing + file paths.
+ */
+export interface YoutubeUploadIntent {
+  channel_ids: string[];
+  video_paths: string[];
+  title: string;
+  description: string;
+  tags: string[];
+  privacy_status: "public" | "unlisted" | "private";
+  playlist_ids?: Record<string, string>;
+  /** RFC 3339 UTC. YouTube keeps the video private until this time, then publishes it. */
+  publish_at?: string;
+}
+
+export interface YoutubeChannelDocument {
+  _id: string;
+  channel_id: string;
+  title: string;
+  custom_url?: string | null;
+  thumbnail_url?: string | null;
+  google_account_email?: string | null;
+  refresh_token: string;
+  access_token: string;
+  access_token_expires_at: Date;
+  auto_upload: boolean;
+  granted_scopes?: string | null;
+  error?: string | null;
+  created_at: Date;
+  updated_at: Date;
+  connected_at: Date;
+}
+
+export interface YoutubeOAuthStateDocument {
+  _id: string;
+  redirect_uri: string;
+  created_at: Date;
+  expires_at: Date;
+}
+
+/** Singleton cursor so auto-uploads can be scheduled 6 hours apart across restarts. */
+export interface YoutubeScheduleDocument {
+  _id: "publish_cursor";
+  next_publish_at: Date;
+  updated_at: Date;
+}
+
 export interface TaskDocument {
   /** The task id. Stored as `_id` and echoed as `task_id` in responses. */
   _id: string;
@@ -65,6 +124,13 @@ export interface TaskDocument {
   cross_post_results?: CrossPostResult[] | null;
   cross_post_error?: string | null;
   cross_post_owner?: string | null;
+
+  // Direct YouTube Data API uploads (independent of upload-post.com)
+  youtube_upload_state?: CrossPostState | null;
+  youtube_upload_results?: YoutubeUploadResult[] | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_owner?: string | null;
+  youtube_upload_intent?: YoutubeUploadIntent | null;
 
   /** Per-task log lines shown in the UI, capped to a recent window. */
   logs?: string[];
@@ -136,6 +202,12 @@ export type BookState =
   | "failed";
 
 export type BookSegmentState = "pending" | "queued" | "rendering" | "complete" | "failed";
+
+/** Same lifecycle as a book segment; shorts are a sibling product, not a fifth audiobook step. */
+export type BookShortState = "pending" | "queued" | "rendering" | "complete" | "failed";
+
+/** Background hook-finding pass. Independent of audiobook `BookState`. */
+export type BookShortsPlanState = "idle" | "planning" | "ready" | "failed";
 
 /** `SegmentOptions` in the snake_case the API and database share. */
 export interface BookSegmentOptionsDocument {
@@ -237,6 +309,11 @@ export interface BookDocument {
   render_params?: BookRenderParamsDocument | null;
   /** Present only for a scanned PDF that needed, or is having, OCR run over it. */
   ocr?: BookOcrDocument | null;
+  /**
+   * Hook-short ideas derived from the book. Independent of the long-form
+   * segment plan, so generating teasers cannot invalidate a chapter render.
+   */
+  shorts?: BookShortsPlanDocument | null;
   /** Non-fatal extraction problems, shown once in the review UI. */
   warnings?: string[];
   error?: string | null;
@@ -262,6 +339,13 @@ export interface BookSegmentDocument {
   video_path?: string | null;
   subtitle_path?: string | null;
   error?: string | null;
+  youtube_title?: string;
+  description?: string;
+  tags?: string[];
+  youtube_upload_state?: CrossPostState | null;
+  youtube_upload_results?: YoutubeUploadResult[] | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_intent?: YoutubeUploadIntent | null;
   updated_at: Date;
 }
 
@@ -283,6 +367,91 @@ export interface BookDecisionDocument {
   rule: string;
   confidence: number;
   source: DecisionSource;
+  updated_at: Date;
+}
+
+/** Last settings used to render hook shorts, so a single short can be retried. */
+export interface BookShortsRenderParamsDocument {
+  voice_name: string;
+  voice_rate: number;
+  voice_volume: number;
+  video_aspect: string;
+  video_source: string;
+  bgm_type: string;
+  bgm_file: string;
+  bgm_volume: number;
+  font_name: string;
+  font_size: number;
+  n_threads: number;
+}
+
+/**
+ * Progress of the pass that walks the book and writes hook-short scripts.
+ *
+ * Kept on the book the same way OCR is: the pass outlives the HTTP request,
+ * and this is what the Shorts tab reads for "part 4 of 18". Independent of
+ * audiobook `state` and of the long-form segment plan.
+ */
+export interface BookShortsPlanDocument {
+  state: BookShortsPlanState;
+  /** Bumped each time a new set of ideas replaces the previous one. */
+  revision: number;
+  chunks_total: number;
+  chunks_done: number;
+  target_duration_seconds: number;
+  max_shorts: number;
+  words_per_minute: number;
+  task_id?: string | null;
+  error?: string | null;
+  render_params?: BookShortsRenderParamsDocument | null;
+  started_at?: Date | null;
+  finished_at?: Date | null;
+}
+
+/**
+ * One hook short: a ~60s teaser written from a passage of the book.
+ *
+ * The spoken script lives on the document rather than on disk because it is a
+ * few hundred words, not a chapter. `block_ids` remember the excerpt so a
+ * regenerate can re-read the same span. Stock-footage output lives in the
+ * ordinary task directory and is pointed at by `video_path`.
+ */
+export interface BookShortDocument {
+  /** `${book_id}:${index}`. */
+  _id: string;
+  book_id: string;
+  index: number;
+  title: string;
+  /** Opening line meant to stop the scroll. */
+  hook: string;
+  /** Spoken narration for the short. */
+  script: string;
+  /**
+   * YouTube listing title. Kept separate from `title` so the on-screen hook
+   * can stay punchy while the upload title names the book.
+   */
+  youtube_title?: string;
+  /** YouTube description (and the caption other platforms reuse). */
+  description?: string;
+  /** YouTube keyword tags, stored without a leading #. */
+  tags?: string[];
+  chapter_title: string;
+  start_block_id: string;
+  block_ids: string[];
+  /** Seconds, estimated from the script's word count. */
+  estimated_duration: number;
+  state: BookShortState;
+  /** Shorts-plan revision this row was written at. */
+  revision: number;
+  task_id?: string | null;
+  video_path?: string | null;
+  audio_path?: string | null;
+  subtitle_path?: string | null;
+  error?: string | null;
+  youtube_upload_state?: CrossPostState | null;
+  youtube_upload_results?: YoutubeUploadResult[] | null;
+  youtube_upload_error?: string | null;
+  youtube_upload_intent?: YoutubeUploadIntent | null;
   updated_at: Date;
 }
 
