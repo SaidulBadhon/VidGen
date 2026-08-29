@@ -67,7 +67,7 @@ export function CommandMenu() {
           </CommandItem>
           <CommandItem onSelect={() => go("/books")}>
             <BookOpen />
-            {t("Book Library")}
+            {t("Books")}
           </CommandItem>
         </CommandGroup>
         <CommandSeparator />

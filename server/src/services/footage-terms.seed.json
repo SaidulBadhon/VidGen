@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "note": "Seed taxonomy for the bulk Pexels pull. Curated general-purpose B-roll coverage plus every term this app has actually issued (from tasks + task artifacts). Reviewable and editable; not baked into code.",
+  "categories": {
+    "nature_landscape": ["forest path", "ocean waves", "mountain range", "desert dunes", "waterfall", "sunrise over hills", "autumn leaves", "river flowing", "starry night sky", "green field wind"],
+    "weather": ["rain on window", "storm clouds", "lightning strike", "fog rolling", "snow falling", "sunny sky timelapse"],
+    "city_architecture": ["city skyline", "busy crosswalk", "neon street night", "old european street", "subway train", "traffic timelapse", "bridge aerial", "construction site", "empty alley"],
+    "people_emotion": ["person thinking", "woman smiling", "man walking alone", "crowd walking", "friends laughing", "couple talking", "child playing", "elderly hands", "person crying", "handshake"],
+    "work_business": ["office meeting", "typing on laptop", "whiteboard brainstorm", "coworking space", "warehouse logistics", "factory machinery", "farmer in field", "teacher classroom"],
+    "technology": ["server room", "circuit board macro", "robot arm", "code on screen", "smartphone in hand", "drone flying", "data center", "satellite dish"],
+    "health_fitness": ["running outdoors", "yoga meditation", "gym weights", "hospital corridor", "doctor stethoscope", "healthy food prep"],
+    "food_drink": ["coffee pouring", "cooking pan", "fresh vegetables", "bread baking", "restaurant kitchen", "wine glass"],
+    "travel_transport": ["airplane takeoff", "train window view", "road trip highway", "ship at sea", "bicycle city", "airport terminal"],
+    "home_interior": ["cozy living room", "candlelight", "fireplace", "reading book", "morning kitchen", "empty bedroom"],
+    "historical_period": ["old library", "antique clock", "vintage typewriter", "castle ruins", "horse carriage", "oil lamp", "parchment writing"],
+    "abstract_texture": ["ink in water", "smoke swirl", "bokeh lights", "paint mixing", "particles floating", "glass reflection"],
+    "finance": ["stock chart screen", "counting cash", "credit card payment", "bank building", "coins stacking"],
+    "animals": ["birds flying", "dog running", "cat closeup", "fish underwater", "horses running", "bees on flower"],
+    "sports": ["soccer match", "basketball court", "swimming pool", "cycling race", "rock climbing"],
+    "education": ["student writing", "library shelves", "graduation ceremony", "science lab", "chalkboard"]
+  },
+  "observed_terms": {
+    "note": "Real terms this app issued against Pexels, recovered from Mongo tasks and storage/tasks/*/script.json. Degenerate fallback outputs ('already', 'barely', 'footage-book') are deliberately EXCLUDED - they are a term-generation bug, out of scope for this plan.",
+    "terms": ["friendly greeting", "people talking", "social greeting", "meaningful conversation", "active listening", "laughing friends moment", "developing friendship warmth", "caregiver meeting introduction", "scandinavian living room view", "man in wheelchair seated", "eye contact emotional exchange", "painful sound shock", "contemplating care future", "dover road", "horses", "mail", "hill"]
+  }
+}

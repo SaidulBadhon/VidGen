@@ -192,6 +192,19 @@ mediaRouter.post("/voices/preview", async (c) => {
 // Cache management
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether a cache-directory entry is a finished cached clip.
+ *
+ * `saveVideo` writes downloads to a `.vid-<hash>.<pid>.<rand>.part` temp in
+ * this same directory and only renames it to `vid-<hash>.mp4` once it has been
+ * probed. Both walkers below filter on the final name so an in-progress
+ * download is neither counted as a cached clip nor deleted out from under the
+ * render that is still writing it.
+ */
+function isCachedVideoName(name: string): boolean {
+  return name.startsWith("vid-") && name.endsWith(".mp4");
+}
+
 mediaRouter.get("/cache/stats", async (c) => {
   const directory = cacheVideosDir(true);
   let files = 0;
@@ -199,6 +212,7 @@ mediaRouter.get("/cache/stats", async (c) => {
 
   if (existsSync(directory)) {
     for (const name of readdirSync(directory)) {
+      if (!isCachedVideoName(name)) continue;
       const stats = statSync(join(directory, name));
       if (!stats.isFile()) continue;
       files += 1;
@@ -223,6 +237,7 @@ mediaRouter.post("/cache/clear", async (c) => {
 
     if (existsSync(directory)) {
       for (const name of readdirSync(directory)) {
+        if (!isCachedVideoName(name)) continue;
         const target = join(directory, name);
         const stats = statSync(target);
         if (!stats.isFile()) continue;

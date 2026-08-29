@@ -202,6 +202,60 @@ export const kokoroSettingsSchema = z.object({
   dtype: z.enum(["q8", "fp32", "fp16", "q4", "q4f16"]).default("q8"),
 });
 
+export const qdrantSettingsSchema = z.object({
+  /**
+   * Vector database backing the semantic footage library.
+   *
+   * The default is the port the compose service publishes on the host, because
+   * the API server and the `footage` CLI both normally run outside Docker. The
+   * containerised app is handed `http://qdrant:6333` through the environment
+   * instead, so the two deployments never need different stored settings.
+   */
+  url: z.string().default("http://127.0.0.1:6333"),
+  /** Empty for a local instance, which is started with no authentication. */
+  api_key: z.string().default(""),
+  /**
+   * Alias the searchable collection is addressed through, never a collection
+   * name directly. Vector width is fixed when a collection is created, so
+   * changing the embedding model means create `<collection>_v<n>` → backfill →
+   * repoint this alias → drop the old one, with no reader aware of the swap.
+   */
+  collection: z.string().default("footage"),
+});
+
+export const footageIndexSettingsSchema = z.object({
+  /** Master switch. Off means nothing is described, embedded, or searchable. */
+  enabled: z.boolean().default(true),
+  /**
+   * Index a clip as soon as a render downloads it rather than waiting for the
+   * next sweep. Purely an optimisation: the files in the cache directory are
+   * the work-list, so anything this misses — a crash, a disabled hook — is
+   * picked up by the next `footage index` run.
+   */
+  auto_index: z.boolean().default(true),
+  /** Vision model that turns a clip's proxy into the structured description. */
+  describe_model: z.string().default("gemini-3.7-flash"),
+  /**
+   * Text embedding model. Its output width is baked into the collection, so a
+   * change here is a migration, not just a new value — see `qdrant.collection`.
+   */
+  embed_model: z.string().default("gemini-embedding-001"),
+  /** Clips in flight at once; each holds an ffmpeg encode plus one API call. */
+  concurrency: z.number().int().min(1).default(4),
+
+  /**
+   * What gets described is a downscaled proxy, never the original file. These
+   * values reduce a 200 MB clip to a couple of megabytes, which keeps every
+   * request inline — no upload API, no branching on file size — while still
+   * being legible enough for the model to read fine detail in the frame.
+   */
+  proxy_height: z.number().int().min(1).default(360),
+  /** Fractional rates are valid: 0.5 is one frame every two seconds. */
+  proxy_fps: z.number().positive().default(2),
+  /** Longer clips are truncated; the opening minute characterises stock footage. */
+  proxy_max_seconds: z.number().int().min(1).default(60),
+});
+
 export const uiSettingsSchema = z.object({
   hide_log: z.boolean().default(false),
   open_task_folder_on_completion: z.boolean().default(true),
@@ -234,6 +288,8 @@ export const settingsSchema = z.object({
   elevenlabs: elevenlabsSettingsSchema.default({}),
   chatterbox: chatterboxSettingsSchema.default({}),
   kokoro: kokoroSettingsSchema.default({}),
+  qdrant: qdrantSettingsSchema.default({}),
+  footage_index: footageIndexSettingsSchema.default({}),
   ui: uiSettingsSchema.default({}),
 });
 
@@ -245,6 +301,8 @@ export type SiliconflowSettings = z.infer<typeof siliconflowSettingsSchema>;
 export type ElevenlabsSettings = z.infer<typeof elevenlabsSettingsSchema>;
 export type ChatterboxSettings = z.infer<typeof chatterboxSettingsSchema>;
 export type KokoroSettings = z.infer<typeof kokoroSettingsSchema>;
+export type QdrantSettings = z.infer<typeof qdrantSettingsSchema>;
+export type FootageIndexSettings = z.infer<typeof footageIndexSettingsSchema>;
 export type UiSettings = z.infer<typeof uiSettingsSchema>;
 export type Settings = z.infer<typeof settingsSchema>;
 
@@ -278,6 +336,7 @@ export const SECRET_FIELDS: ReadonlyArray<[SettingsSection, string]> = [
   ["siliconflow", "api_key"],
   ["elevenlabs", "api_key"],
   ["chatterbox", "api_key"],
+  ["qdrant", "api_key"],
 ];
 
 export { SUPPORTED_VIDEO_CODECS };

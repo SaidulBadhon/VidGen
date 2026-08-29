@@ -45,14 +45,23 @@ function parseFrameRate(rate: string | undefined): number {
   return n / d;
 }
 
-export async function probe(filePath: string): Promise<MediaInfo> {
-  const { stdout } = await runFfprobe([
-    "-print_format",
-    "json",
-    "-show_format",
-    "-show_streams",
-    filePath,
-  ]);
+/**
+ * How long ffprobe may run before it is killed.
+ *
+ * `runFfprobe` only arms its kill timer when a timeout is supplied
+ * (`ffmpeg.ts`), so without this a probe of a corrupt or truncated file could
+ * block forever — and because probes run inside the render's bounded worker
+ * pool, one stuck process holds its slot for the life of the server. Reading
+ * container metadata is a sub-second operation even for a long audiobook
+ * master, so a minute is far past "slow" and safely inside "hung".
+ */
+const PROBE_TIMEOUT_MS = 60_000;
+
+export async function probe(filePath: string, timeoutMs = PROBE_TIMEOUT_MS): Promise<MediaInfo> {
+  const { stdout } = await runFfprobe(
+    ["-print_format", "json", "-show_format", "-show_streams", filePath],
+    { timeoutMs },
+  );
 
   const parsed = JSON.parse(stdout) as FfprobeOutput;
   const streams = parsed.streams ?? [];

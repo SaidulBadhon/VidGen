@@ -511,3 +511,211 @@ export interface BookBlockEditDocument {
   text: string;
   updated_at: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Semantic footage library
+//
+// The filesystem is the work-list. The indexer walks `cacheVideosDir()` and
+// asks Mongo, per file, "have I already described this one at the current
+// versions?". So the durable record of what footage exists is the directory
+// listing; `footage_index` is only a cache of the expensive answers plus a
+// record of what went wrong getting them.
+//
+// That inversion is the point, not an accident of ordering. A work-list in
+// Mongo has to stay honest against an indexer that can die mid-clip, which
+// costs per-row leases, an owner id, a generation counter and tombstones — and
+// every one of those was a defect in an earlier draft. A cache needs none of
+// it: dropping this collection entirely costs Gemini spend and nothing else,
+// because every clip is still on disk and the next walk finds all of them.
+// Nothing here is ever the reason a clip is lost or re-downloaded.
+// ---------------------------------------------------------------------------
+
+/**
+ * A clip description as it was stored, which is not necessarily the shape the
+ * current describer would produce.
+ *
+ * The enum-ish fields are widened to `string` deliberately. A cached row may
+ * have been written at an older `describe_version` with a different vocabulary,
+ * so a caller that needs the narrow type must re-parse the value with
+ * `clipDescriptionSchema` after checking the version, rather than trusting this
+ * declaration. Declaring the describer's strict inferred type on a stored
+ * document would claim a guarantee the collection cannot make — the rows
+ * outlive the schema that wrote them, which is exactly why `describe_version`
+ * exists.
+ */
+export interface FootageClipDescription {
+  /** One line, the thing you would say to a person choosing a clip. */
+  summary: string;
+  detailed_description: string;
+  /** Where this clip would work, in editorial terms rather than visual ones. */
+  use_cases: string[];
+  mood: string[];
+  tags: string[];
+  /** e.g. `indoor`, `outdoor`. */
+  setting: string;
+  /** e.g. `day`, `night`. */
+  time_of_day: string;
+  has_people: boolean;
+  has_on_screen_text: boolean;
+  /** e.g. `static`, `pan`, `handheld`. */
+  camera_motion: string;
+  /** Reasons to pass over an otherwise matching clip, e.g. `low light`. */
+  quality_flags: string[];
+}
+
+/**
+ * `indexed` and `failed` are the two resting states: described, embedded and
+ * upserted, or tried and unusable. A failed row keeps its file — nothing here
+ * ever deletes bytes a render might be holding.
+ *
+ * `stale` is not a failure. It is how a search term added after the fact gets
+ * into Qdrant cheaply. Terms accumulate by `$addToSet` from the download hook,
+ * and a term arriving for a clip that is already described changes only the
+ * payload: not the pixels, not the description, not the vector. `stale` marks
+ * exactly that job — re-read `search_terms`, re-upsert the payload, mark
+ * `indexed` again, with no proxy build, no Gemini describe call and no
+ * embedding. Without the third state the indexer would have to either
+ * re-describe an unchanged clip to pick up a one-word provenance change, or
+ * carry a separate freshness field that the describe/embed version pair does
+ * not cover.
+ */
+export type FootageIndexState = "indexed" | "failed" | "stale";
+
+/**
+ * One failed attempt, appended rather than overwritten.
+ *
+ * A scalar `error` would keep only the most recent reason, which is the least
+ * useful one: a clip that fails ffprobe, then times out, then trips a schema
+ * violation is a different problem from one that has hit the same rate limit
+ * three times, and only the history tells them apart.
+ */
+export interface FootageIndexError {
+  at: Date;
+  message: string;
+}
+
+/**
+ * A creator credit, mirroring `CachedMaterialSourceInfo["creator"]` because
+ * that is where the values come from — the download hook copies provenance off
+ * the material it just saved.
+ */
+export interface FootageCreator {
+  id?: string;
+  name?: string;
+  profile_page?: string;
+}
+
+/**
+ * The cached description of one clip on disk, plus its provenance and its
+ * failures. Not a work-list row: see the section note above.
+ */
+export interface FootageIndexDocument {
+  /**
+   * v5 UUID derived from `local_file`. Qdrant accepts only a uint64 or a UUID
+   * as a point id, so deriving one from the filename lets the same value key
+   * the Mongo row and the vector: both are found from the file alone, and
+   * there is no separate mapping to keep in sync or to lose.
+   */
+  _id: string;
+  /**
+   * Basename only, e.g. `vid-d6e9….mp4`, resolved through `cacheVideosDir()`.
+   *
+   * Never an absolute path. The host process and a container see the same file
+   * at different paths, so a stored path written by one side reads as "file is
+   * gone" to the other — and reconcile answers that by deleting the point. One
+   * run from the wrong side would empty the index.
+   */
+  local_file: string;
+  state: FootageIndexState;
+  /**
+   * The describer's output, cached so a re-run never re-pays Gemini for a clip
+   * whose bytes have not changed. Absent on a row that has only ever failed.
+   */
+  description?: FootageClipDescription | null;
+
+  // Provenance the filename cannot carry. `vid-<md5(url)>.mp4` is a one-way
+  // hash of a URL that is nowhere else on disk, so without these fields a clip
+  // in the cache has no recoverable source, no credit and no reason for being
+  // there.
+  provider: string;
+  /**
+   * Every term that has ever selected this clip, accumulated with `$addToSet`.
+   * A clip reached by three searches is one file with three terms, not three
+   * rows, and a new term here is what flips the row to `stale`.
+   */
+  search_terms: string[];
+  asset_id?: string;
+  rendition_id?: string;
+  source_page?: string;
+  creator?: FootageCreator | null;
+
+  // Probed from the file, so a search can filter on shape without opening it.
+  duration?: number;
+  width?: number;
+  height?: number;
+  bytes?: number;
+
+  /**
+   * Which describer and embedder produced this row. The indexer compares the
+   * pair against the current constants and treats a mismatch as work to do, so
+   * bumping a version is the whole migration mechanism — which is why the two
+   * are indexed together rather than separately.
+   */
+  describe_version: number;
+  embed_version: number;
+
+  /**
+   * How many times this clip has been through the pipeline. Read as a give-up
+   * signal for a file that will never describe cleanly, so a repeated
+   * `indexAll` does not spend on it forever.
+   */
+  attempts: number;
+  last_attempt_at?: Date;
+  errors?: FootageIndexError[];
+  created_at: Date;
+  updated_at: Date;
+}
+
+/** What one search term yielded during a pull, and why it yielded that much. */
+export interface FootageRunTermResult {
+  term: string;
+  aspect: string;
+  attempted: number;
+  accepted: number;
+  /** Rejected for not matching the repo's exact-resolution rule. */
+  rejected_resolution: number;
+  /** Last HTTP status seen for the term: a 429 here explains a thin result. */
+  last_status?: number;
+}
+
+export type FootageRunStopReason = "complete" | "budget" | "disk" | "aborted" | "error";
+
+/**
+ * One bulk-pull run.
+ *
+ * This is the one place where a document is the only record, because a clip
+ * that was never downloaded leaves no file — and the filesystem work-list can
+ * only speak about files that exist. Without this, "term X is thin" is
+ * indistinguishable from "term X was rate-limited", "the byte budget ran out
+ * before term X" and "the run was killed halfway", which are four different
+ * things to do next.
+ *
+ * It is a log: written by the pull, read by a person, never consulted by the
+ * indexer.
+ */
+export interface FootageRunDocument {
+  _id: string;
+  started_at: Date;
+  /** Absent while a run is in flight, and on a run whose process was killed. */
+  finished_at?: Date;
+  stop_reason?: FootageRunStopReason;
+  per_term: FootageRunTermResult[];
+  /**
+   * Actual bytes written to disk, not the sizes the provider advertised — the
+   * budget is spent in real bytes, and the advertised size is discarded long
+   * before it reaches here.
+   */
+  bytes_written: number;
+  clips_added: number;
+  clips_failed: number;
+}

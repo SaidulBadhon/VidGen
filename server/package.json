@@ -8,6 +8,7 @@
     "dev": "LISTEN_PORT=7778 bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "cli": "bun src/cli.ts",
+    "footage": "bun src/footageCli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
@@ -17,6 +18,7 @@
     "@ai-sdk/openai-compatible": "^1.0.0",
     "@huggingface/transformers": "^3.5.1",
     "@napi-rs/canvas": "^0.1.60",
+    "@qdrant/js-client-rest": "~1.15.0",
     "ai": "^5.0.0",
     "hono": "^4.6.0",
     "hyperframes": "0.8.4",

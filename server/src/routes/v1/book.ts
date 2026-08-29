@@ -333,7 +333,7 @@ export const NO_TEXT_MESSAGE = "no readable text was found in this file";
  *
  * Deliberately not a silent acceptance. A book with no text layer and no engine
  * to read it can never be narrated, and accepting it would leave the user with a
- * library entry that fails at the far end of a render for a reason nobody could
+ * book that fails at the far end of a render for a reason nobody could
  * see. Naming the setting is the difference between an error and an instruction.
  */
 export const OCR_DISABLED_MESSAGE =
@@ -446,7 +446,7 @@ bookRouter.post("/books", async (c) => {
       : await buildSegmentUpserts(bookId, structure, decisions, segmentOptionsFromDocument(segmentOptions), 1);
 
   // Written even when it is empty: the review screen reads it the moment the
-  // book appears in the library, and a missing file there reads as corruption
+  // book appears in the books list, and a missing file there reads as corruption
   // rather than as work in progress.
   await writeBookStructure(bookId, structure);
 

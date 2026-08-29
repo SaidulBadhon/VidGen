@@ -32,7 +32,7 @@ export function AppSidebar() {
 
   const createItems = [
     { title: t("Mode Short Video"), url: "/", icon: Clapperboard },
-    { title: t("Book Library"), url: "/books", icon: BookOpen },
+    { title: t("Books"), url: "/books", icon: BookOpen },
   ];
   const workspaceItems = [
     { title: t("Task Manager"), url: "/tasks", icon: ListTodo },

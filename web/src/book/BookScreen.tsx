@@ -4,7 +4,7 @@
  * The panels are views of one book, so this container owns the live progress
  * stream they all read from — a stream per panel would mean several EventSources
  * for one book. The selected book and step live in the URL so a refresh or a
- * shared link lands on the same screen. The library of all books is a separate
+ * shared link lands on the same screen. The list of all books is a separate
  * page; this one is named after the book at the top.
  */
 
@@ -491,7 +491,7 @@ export function BookScreen() {
         <BreadcrumbList>
           <BreadcrumbItem>
             <BreadcrumbLink asChild>
-              <Link to="/books">{t("Book Library")}</Link>
+              <Link to="/books">{t("Books")}</Link>
             </BreadcrumbLink>
           </BreadcrumbItem>
           <BreadcrumbSeparator />
@@ -503,7 +503,7 @@ export function BookScreen() {
 
       <div>
         <Button size="sm" variant="ghost" className="-ml-2 mb-3" onClick={() => navigate("/books")}>
-          <ArrowLeft size={14} /> {t("Book Back To Library")}
+          <ArrowLeft size={14} /> {t("Book Back To Books")}
         </Button>
 
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">

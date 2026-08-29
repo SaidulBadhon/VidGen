@@ -1,7 +1,7 @@
 /**
  * Step 1 of an open book: what import produced.
  *
- * The library and the uploader live on their own page. This panel is the
+ * The books list and the uploader live on their own page. This panel is the
  * record of the file that became this book — OCR progress while a scan is
  * still being read, then the extraction summary once there is text to review.
  */

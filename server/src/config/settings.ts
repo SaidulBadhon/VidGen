@@ -65,6 +65,13 @@ const ENV_BINDINGS: readonly EnvBinding[] = [
 
   { section: "app", key: "google_client_id", envVars: ["GOOGLE_CLIENT_ID"] },
   { section: "app", key: "google_client_secret", envVars: ["GOOGLE_CLIENT_SECRET"] },
+
+  // Semantic footage library. The URL is bound as well as the key because it is
+  // deployment topology rather than a preference: the compose file hands the
+  // container `http://qdrant:6333`, while a host-run server and CLI reach the
+  // same service on the published loopback port from the stored default.
+  { section: "qdrant", key: "url", envVars: ["QDRANT_URL"] },
+  { section: "qdrant", key: "api_key", envVars: ["QDRANT_API_KEY"] },
 ];
 
 /** The bound value from the environment, or undefined when nothing is set. */

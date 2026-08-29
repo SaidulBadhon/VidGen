@@ -4,9 +4,11 @@
  */
 
 import { existsSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { basename, isAbsolute, join } from "node:path";
-import { unlink } from "node:fs/promises";
+import { rename, unlink } from "node:fs/promises";
 import { appConfig } from "../../config/settings.ts";
+import { noteDownloadedMaterial } from "../footage/hook.ts";
 import { logger, errorMessage, errorName } from "../../utils/logger.ts";
 import { md5 } from "../../utils/misc.ts";
 import { cacheVideosDir, taskDir } from "../../utils/paths.ts";
@@ -57,19 +59,112 @@ export function materialSourceRecord(item: MaterialInfo, localPath: string): Rec
 }
 
 /**
+ * Probe results for files already on disk, remembered for the process lifetime.
+ *
+ * A cache hit used to be returned unprobed, so a single truncated write
+ * poisoned that URL until someone cleared the cache. Probing every hit instead
+ * would mean an ffprobe per use rather than per file — a book pool reuses the
+ * same few hundred clips many times over — so the answer is memoised by path.
+ *
+ * Size and mtime ride along because the thing being remembered is a verdict on
+ * *bytes*, not on a name: a file truncated underneath a running server (a
+ * container killed mid-write, a full disk) would otherwise keep the verdict it
+ * earned before it was damaged, which is the exact failure this probe exists to
+ * catch. Comparing them costs a `stat` the cache-hit branch already performs.
+ */
+interface CachedVideoVerdict {
+  size: number;
+  mtimeMs: number;
+  valid: boolean;
+}
+
+const cacheHitValidity = new Map<string, CachedVideoVerdict>();
+
+async function isCachedVideoValid(videoPath: string, stats: { size: number; mtimeMs: number }): Promise<boolean> {
+  const remembered = cacheHitValidity.get(videoPath);
+  if (remembered && remembered.size === stats.size && remembered.mtimeMs === stats.mtimeMs) {
+    return remembered.valid;
+  }
+
+  const valid = await isValidVideo(videoPath);
+  cacheHitValidity.set(videoPath, { size: stats.size, mtimeMs: stats.mtimeMs, valid });
+  return valid;
+}
+
+/** Flush the sink at least this often, so a large clip is never fully resident. */
+const DOWNLOAD_FLUSH_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Streams a response body to a file.
+ *
+ * The previous `Bun.write(path, await response.arrayBuffer())` held the whole
+ * clip in memory first; at the concurrency the render uses, and with clips
+ * measured up to 211 MB, that is a multi-gigabyte spike alongside a running
+ * ffmpeg. Writing through a sink keeps resident memory at the buffer size.
+ */
+async function streamToFile(response: Response, destination: string): Promise<void> {
+  const body = response.body;
+  if (!body) throw new Error("download failed: response had no body");
+
+  const sink = Bun.file(destination).writer({ highWaterMark: DOWNLOAD_FLUSH_BYTES });
+  let buffered = 0;
+
+  try {
+    for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+      const written = sink.write(chunk);
+      buffered += typeof written === "number" ? written : await written;
+      if (buffered >= DOWNLOAD_FLUSH_BYTES) {
+        await sink.flush();
+        buffered = 0;
+      }
+    }
+    await sink.end();
+  } catch (error) {
+    // Close the descriptor on the way out; the caller removes the partial file.
+    try {
+      sink.end();
+    } catch {
+      // Already closed.
+    }
+    throw error;
+  }
+}
+
+/**
  * Downloads a material and confirms it decodes.
  *
  * Providers occasionally serve truncated files or an error page under a .mp4
  * name; both would otherwise fail much later, mid-render.
+ *
+ * The bytes land on a unique temp in the destination directory and are probed
+ * there, so the final `vid-<hash>.mp4` name only ever appears as a complete,
+ * playable file — one rename, no window in which another caller can read a
+ * half-written clip. The temp is unique rather than shared, which is what makes
+ * an in-flight dedup map unnecessary: two callers racing on one URL both
+ * finish and one rename wins with identical bytes. A shared promise would
+ * instead share one `AbortSignal`, so cancelling one task would abort a
+ * different render's download.
+ *
+ * The temp lives in the destination directory, never `tmpdir()`, because
+ * `material_directory` may be any absolute path and a rename across devices
+ * fails with `EXDEV`.
  */
 export async function saveVideo(videoUrl: string, saveDir = "", signal?: AbortSignal): Promise<string> {
   const directory = saveDir || cacheVideosDir(true);
   const urlHash = md5(videoUrl.split("?")[0]!);
   const videoPath = join(directory, `vid-${urlHash}.mp4`);
 
-  if (existsSync(videoPath) && statSync(videoPath).size > 0) {
-    logger.info(`video already exists: ${videoPath}`);
-    return videoPath;
+  const cached = existsSync(videoPath) ? statSync(videoPath) : undefined;
+  if (cached && cached.size > 0) {
+    if (await isCachedVideoValid(videoPath, cached)) {
+      logger.info(`video already exists: ${videoPath}`);
+      return videoPath;
+    }
+    // Something outside this process truncated it — a killed container, a full
+    // disk. Re-downloading over it through the atomic path below is the only
+    // way that URL ever recovers; nothing is deleted, so a render holding the
+    // old file keeps reading it.
+    logger.warning(`cached video failed validation, downloading again: ${videoPath}`);
   }
 
   const response = await providerFetch(videoUrl, {
@@ -81,15 +176,26 @@ export async function saveVideo(videoUrl: string, saveDir = "", signal?: AbortSi
     throw new Error(`download failed: HTTP ${response.status}`);
   }
 
-  await Bun.write(videoPath, await response.arrayBuffer());
+  const tempPath = join(directory, `.vid-${urlHash}.${process.pid}.${randomBytes(8).toString("hex")}.part`);
 
-  if (existsSync(videoPath) && statSync(videoPath).size > 0 && (await isValidVideo(videoPath))) {
-    return videoPath;
+  try {
+    await streamToFile(response, tempPath);
+
+    if (existsSync(tempPath) && statSync(tempPath).size > 0 && (await isValidVideo(tempPath))) {
+      await rename(tempPath, videoPath);
+      // Just probed, so a later hit in this process need not probe it again.
+      const written = statSync(videoPath);
+      cacheHitValidity.set(videoPath, { size: written.size, mtimeMs: written.mtimeMs, valid: true });
+      return videoPath;
+    }
+
+    logger.warning(`invalid video file: ${videoPath}`);
+    return "";
+  } finally {
+    // A no-op after a successful rename; the catch keeps a cleanup failure from
+    // masking the real error on the way out.
+    await unlink(tempPath).catch(() => {});
   }
-
-  logger.warning(`invalid video file: ${videoPath}`);
-  await unlink(videoPath).catch(() => {});
-  return "";
 }
 
 /** Resolves where downloaded materials are stored for this task. */
@@ -193,6 +299,9 @@ export async function downloadVideos(options: DownloadVideosOptions): Promise<st
 
       logger.info(`video saved: ${savedPath}`);
       videoPaths.push(savedPath);
+      // Fire-and-forget provenance for the footage library. Synchronous, throws
+      // nothing and awaits nothing, so it cannot slow or fail this loop.
+      noteDownloadedMaterial(item, savedPath);
       try {
         materialSources.push(materialSourceRecord(item, savedPath));
       } catch (error) {
@@ -289,6 +398,7 @@ async function downloadVideosByScriptOrder(options: {
 
         logger.info(`video saved: ${savedPath}`);
         videoPaths.push(savedPath);
+        noteDownloadedMaterial(item, savedPath);
         try {
           materialSources.push(materialSourceRecord(item, savedPath));
         } catch (error) {

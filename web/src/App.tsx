@@ -11,7 +11,7 @@ import { AppSidebar } from "./components/app-sidebar.tsx";
 import { CommandMenu, CommandMenuProvider } from "./components/command-menu.tsx";
 import { SidebarInset, SidebarProvider } from "./components/ui/sidebar";
 import { BookScreen } from "./book/BookScreen.tsx";
-import { LibraryScreen } from "./book/LibraryScreen.tsx";
+import { BooksScreen } from "./book/BooksScreen.tsx";
 import { CacheSettingsPage } from "./settings/cache.tsx";
 import { InterfaceSettingsPage } from "./settings/interface.tsx";
 import { SettingsLayout } from "./settings/layout.tsx";
@@ -53,7 +53,7 @@ export default function App() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route index element={<VideoScreen />} />
-        <Route path="books" element={<LibraryScreen />} />
+        <Route path="books" element={<BooksScreen />} />
         <Route path="books/:bookId/:step?" element={<BookScreen />} />
         <Route path="tasks" element={<TasksPage />} />
         <Route path="settings" element={<SettingsLayout />}>

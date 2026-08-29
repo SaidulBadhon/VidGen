@@ -14,6 +14,8 @@ import type {
   BookDocument,
   BookSegmentDocument,
   BookShortDocument,
+  FootageIndexDocument,
+  FootageRunDocument,
   MaterialCacheDocument,
   SettingsDocument,
   TaskDocument,
@@ -73,6 +75,25 @@ async function createIndexes(database: Db): Promise<void> {
 
   await database.collection<YoutubeOAuthStateDocument>("youtube_oauth_states").createIndexes([
     { key: { expires_at: 1 }, name: "expires_at_ttl", expireAfterSeconds: 0 },
+  ]);
+
+  // Footage rows are only ever reached from a filename or from "what still
+  // needs work". `local_file` is unique because one file is one row — the id is
+  // derived from the filename, so a second row for it would mean two ids for
+  // one clip and two points for one vector. The version pair is indexed
+  // together because it is queried together: a bump to either constant is what
+  // turns an existing row back into work. `state` carries the same scan for
+  // rows that are current but `stale` or `failed`.
+  await database.collection<FootageIndexDocument>("footage_index").createIndexes([
+    { key: { local_file: 1 }, name: "local_file_unique", unique: true },
+    { key: { describe_version: 1, embed_version: 1 }, name: "describe_embed_version" },
+    { key: { state: 1 }, name: "state" },
+  ]);
+
+  // Runs are read as "what happened recently, and why did it stop", newest
+  // first — the same access pattern tasks and books have.
+  await database.collection<FootageRunDocument>("footage_runs").createIndexes([
+    { key: { started_at: -1 }, name: "started_at_desc" },
   ]);
 }
 
@@ -163,6 +184,14 @@ export function youtubeOAuthStatesCollection(): Collection<YoutubeOAuthStateDocu
 
 export function youtubeScheduleCollection(): Collection<YoutubeScheduleDocument> {
   return requireDb().collection<YoutubeScheduleDocument>("youtube_schedule");
+}
+
+export function footageIndexCollection(): Collection<FootageIndexDocument> {
+  return requireDb().collection<FootageIndexDocument>("footage_index");
+}
+
+export function footageRunsCollection(): Collection<FootageRunDocument> {
+  return requireDb().collection<FootageRunDocument>("footage_runs");
 }
 
 export function isConnected(): boolean {

@@ -12,6 +12,30 @@ services:
       retries: 5
       start_period: 20s
 
+  qdrant:
+    image: qdrant/qdrant:v1.15.4
+    container_name: vidgen-qdrant
+    restart: unless-stopped
+    # Published on loopback because the semantic footage indexer runs as a host
+    # bun process, not in this network.
+    ports:
+      - "127.0.0.1:6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # The image carries no curl, wget or nc — only Debian bash. bash's
+      # /dev/tcp speaks the HTTP request itself; /readyz is 200 only once the
+      # node has finished loading its collections.
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf "GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && grep -q "200 OK" <&3'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   app:
     build:
       context: .
@@ -25,11 +49,15 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       MONGODB_URI: mongodb://mongo:27017
       MONGODB_DB: vidgen
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: 8080
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -55,3 +83,4 @@ services:
 
 volumes:
   mongo-data:
+  qdrant-data:
