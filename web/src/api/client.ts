@@ -56,6 +56,21 @@ export interface Settings {
   siliconflow: Record<string, unknown>;
   elevenlabs: Record<string, unknown>;
   chatterbox: Record<string, unknown>;
+  qdrant: {
+    url: string;
+    api_key: string;
+    collection: string;
+  };
+  footage_index: {
+    enabled: boolean;
+    auto_index: boolean;
+    describe_model: string;
+    embed_model: string;
+    concurrency: number;
+    proxy_height: number;
+    proxy_fps: number;
+    proxy_max_seconds: number;
+  };
   ui: Record<string, unknown>;
 }
 

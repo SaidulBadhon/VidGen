@@ -8,9 +8,10 @@ import { Hono } from "hono";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import { footageIndexCollection } from "../../db/client.ts";
 import { ALLOWED_MATERIAL_SUFFIXES } from "../../models/const.ts";
 import { voicePreviewRequestSchema } from "../../models/schema.ts";
-import { badRequest, notFound } from "../../http/errors.ts";
+import { badRequest, conflict, notFound } from "../../http/errors.ts";
 import { serveFileWithRange } from "../../http/staticFiles.ts";
 import {
   BgmServiceError,
@@ -22,6 +23,13 @@ import {
   SUPPORTED_BGM_EXTENSIONS,
 } from "../../services/bgm.ts";
 import { clearMaterialSearchCache, getMaterialSearchCacheStats } from "../../services/material/cache.ts";
+import { isLocked as isFootageIndexLocked } from "../../services/footage/lock.ts";
+import {
+  deletePoints as deleteFootagePoints,
+  isAvailable as isQdrantAvailable,
+} from "../../services/footage/qdrant.ts";
+import { pointIdFor } from "../../services/footage/types.ts";
+import { taskQueue } from "../../tasks/queue.ts";
 import { isNoVoice, listVoicesForServer } from "../../services/voice/voices.ts";
 import { synthesizeVoicePreview } from "../../services/voice/preview.ts";
 import * as sonilo from "../../services/music/sonilo.ts";
@@ -224,26 +232,125 @@ mediaRouter.get("/cache/stats", async (c) => {
   return c.json(getResponse(200, { videos: { files, bytes }, search }));
 });
 
+/** Files deleted per `Promise.all` wave. Bounds open file descriptors. */
+const CLEAR_UNLINK_CONCURRENCY = 32;
+
+/** Mongo `_id`s per `deleteMany`. One round trip per chunk, not per clip. */
+const CLEAR_MONGO_CHUNK_SIZE = 500;
+
 mediaRouter.post("/cache/clear", async (c) => {
   const scope = c.req.query("scope") ?? "all";
   let removedFiles = 0;
   let removedSearches = 0;
+  let removedRows = 0;
+  let submittedPoints = 0;
+  /** Whether the vector store was actually cleaned up, and if not, why not. */
+  let qdrantCleanup: "not_needed" | "ok" | "unavailable" | "failed" = "not_needed";
 
   if (scope === "all" || scope === "videos") {
+    // --- refuse to race an indexing run ------------------------------------
+    // The indexer walks this directory and writes a row and a point per file.
+    // Deleting underneath it produces points for files that no longer exist and
+    // rows the next run will fail on, so the clear waits rather than competing.
+    const lock = await isFootageIndexLocked().catch((error: unknown) => {
+      // A Mongo outage is not "the lock is free": failing open here is how a
+      // clear ends up running concurrently with an indexer anyway.
+      logger.warning(`could not read the footage index lock: ${errorMessage(error)}`);
+      throw conflict("the footage index lock could not be read; try again shortly");
+    });
+    if (lock) {
+      throw conflict(
+        `a footage index run is in progress (${lock.label}, ${lock.hostname} pid ${lock.pid}, ` +
+          `held since ${lock.acquired_at.toISOString()}); try again when it finishes`,
+      );
+    }
+
+    // --- refuse to race a live render --------------------------------------
+    // A render resolves its materials from this directory and reads them for
+    // the length of an ffmpeg encode. Clearing mid-render deletes clips out
+    // from under it, and the failure surfaces minutes later as a broken
+    // concat rather than as anything connected to this request.
+    const queue = taskQueue.stats();
+    if (queue.running > 0 || queue.queued > 0) {
+      throw conflict(
+        `the task queue is not idle (${queue.running} running, ${queue.queued} queued); ` +
+          `clearing the cache now would delete clips out from under a render`,
+      );
+    }
+
     const directory = cacheVideosDir(true);
     // Age-based pruning: 0 or missing means "everything".
     const maxAgeDays = Number(c.req.query("max_age_days") ?? 0);
     const cutoff = maxAgeDays > 0 ? Date.now() - maxAgeDays * 86_400_000 : Infinity;
 
+    // Collected first, deleted in batches. The per-file `rm`/`deleteOne`/
+    // `delete` loop this replaced was three round trips per clip; at the ~1,000
+    // clips this library is sized for that is thousands of sequential awaits in
+    // one request, which is minutes of held connection.
+    const doomed: string[] = [];
     if (existsSync(directory)) {
       for (const name of readdirSync(directory)) {
         if (!isCachedVideoName(name)) continue;
-        const target = join(directory, name);
-        const stats = statSync(target);
+        const stats = statSync(join(directory, name));
         if (!stats.isFile()) continue;
         if (maxAgeDays > 0 && stats.mtimeMs > cutoff) continue;
-        await rm(target, { force: true });
-        removedFiles += 1;
+        doomed.push(name);
+      }
+    }
+
+    for (let start = 0; start < doomed.length; start += CLEAR_UNLINK_CONCURRENCY) {
+      const wave = doomed.slice(start, start + CLEAR_UNLINK_CONCURRENCY);
+      await Promise.all(wave.map((name) => rm(join(directory, name), { force: true })));
+      removedFiles += wave.length;
+    }
+
+    // --- Mongo: one delete per chunk ---------------------------------------
+    // The row is keyed by the same uuidv5 the point is, so the ids are derived
+    // rather than looked up: no `find` pass, and no way for the two deletes to
+    // disagree about which clip they are about.
+    const ids = doomed.map((name) => pointIdFor(name));
+
+    for (let start = 0; start < ids.length; start += CLEAR_MONGO_CHUNK_SIZE) {
+      const chunk = ids.slice(start, start + CLEAR_MONGO_CHUNK_SIZE);
+      try {
+        const result = await footageIndexCollection().deleteMany({ _id: { $in: chunk } });
+        removedRows += result.deletedCount ?? 0;
+      } catch (error) {
+        // The files are already gone, so the clear has happened. A stranded row
+        // costs a re-describe at worst; `reconcile` unlinks it either way.
+        logger.error(`cache clear could not drop footage rows: ${errorMessage(error)}`);
+        break;
+      }
+    }
+
+    // --- Qdrant: batched, and never fatal ----------------------------------
+    // `deletePoints` chunks internally. A dead Qdrant must not fail a clear
+    // whose files are already unlinked — the points it leaves behind are
+    // orphans, which is exactly the drift `footage reconcile` exists to repair,
+    // and which `GET /footage/stats` reports in the meantime.
+    if (ids.length > 0) {
+      try {
+        if (await isQdrantAvailable()) {
+          // `deletePoints` answers with the number of ids it submitted, not the
+          // number of points that turned out to exist — Qdrant's delete is
+          // idempotent and does not report per-id hits. The field below is
+          // named for that, so a reader cannot mistake it for a measurement of
+          // what the collection held.
+          submittedPoints = await deleteFootagePoints(ids);
+          qdrantCleanup = "ok";
+        } else {
+          qdrantCleanup = "unavailable";
+          logger.warning(
+            `cache clear removed ${ids.length} clip(s) but qdrant is unavailable; ` +
+              `run \`footage reconcile\` to drop the orphaned points`,
+          );
+        }
+      } catch (error) {
+        qdrantCleanup = "failed";
+        logger.error(
+          `cache clear could not delete footage points: ${errorMessage(error)}; ` +
+            `run \`footage reconcile\` to drop the orphaned points`,
+        );
       }
     }
   }
@@ -252,8 +359,20 @@ mediaRouter.post("/cache/clear", async (c) => {
     removedSearches = await clearMaterialSearchCache();
   }
 
-  logger.info(`cache cleared: scope=${scope}, files=${removedFiles}, searches=${removedSearches}`);
-  return c.json(getResponse(200, { removed_files: removedFiles, removed_searches: removedSearches }));
+  logger.info(
+    `cache cleared: scope=${scope}, files=${removedFiles}, searches=${removedSearches}, ` +
+      `footage_rows=${removedRows}, qdrant=${qdrantCleanup} (${submittedPoints} point id(s))`,
+  );
+  return c.json(
+    getResponse(200, {
+      removed_files: removedFiles,
+      removed_searches: removedSearches,
+      removed_footage_rows: removedRows,
+      /** Point ids handed to Qdrant for deletion — not a count of stored points. */
+      qdrant_points_submitted: submittedPoints,
+      qdrant_cleanup: qdrantCleanup,
+    }),
+  );
 });
 
 // ---------------------------------------------------------------------------
