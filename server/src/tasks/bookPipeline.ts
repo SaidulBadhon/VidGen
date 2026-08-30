@@ -38,7 +38,9 @@ import {
   buildSegmentFootage,
   ensureBookFootagePool,
   footageSearchTerms,
+  FOOTAGE_CLIP_SECONDS,
 } from "../services/book/footage.ts";
+import type { SceneCue } from "../services/footage/sceneMatch.ts";
 import {
   coverFileFingerprint,
   coverOverlayCacheName,
@@ -64,6 +66,7 @@ import { errorMessage, logger } from "../utils/logger.ts";
 import { getUuid } from "../utils/misc.ts";
 import { booksDir, bookSegmentDir, bookSegmentFileStem, fontDir } from "../utils/paths.ts";
 import { PROCESS_OWNER_ID } from "./owner.ts";
+import { resolveSceneMatchedMaterials } from "./pipeline.ts";
 import { taskQueue } from "./queue.ts";
 import { appendTaskLog, createTask, updateTask } from "./state.ts";
 import { scheduleAutoYoutubeUploadForSegment } from "./youtubeUpload.ts";
@@ -685,6 +688,11 @@ export async function resolveSegmentTemplateAssets(
  * The pool is fetched once per book. That is not an optimisation — measured on a
  * real 74-segment book, per-segment downloads come to roughly 230 GB against
  * 4.7 GB pooled, so the pooled shape is the only one that exists.
+ *
+ * With `scene_footage.enabled` on, the narration's own cues are matched against
+ * the indexed gallery first and the result is rendered in order. That path is
+ * entirely inside the flag: off — which is the default — the pool below is the
+ * only thing that runs, exactly as before.
  */
 export async function resolveSegmentFootage(input: {
   bookId: string;
@@ -693,6 +701,11 @@ export async function resolveSegmentFootage(input: {
   chapterTitle: string;
   segmentIndex: number;
   narrationText: string;
+  /**
+   * The narration's cues, held in memory. Scene matching reads these and never
+   * the written SRT (§3.1); absent, it is skipped and the pool path runs.
+   */
+  cues?: readonly SceneCue[];
   audioFile: string;
   outputFile: string;
   aspect: VideoAspectValue;
@@ -706,6 +719,33 @@ export async function resolveSegmentFootage(input: {
   const source = input.params.footage_source || appConfig().video_source || "pexels";
 
   try {
+    // A book has no `video_clip_duration` and no `video_clip_speed`: the unit is
+    // FOOTAGE_CLIP_SECONDS and buildSegmentFootage renders at 1x, so those are
+    // the numbers the duration band has to be built from.
+    const sceneClips = await resolveSceneMatchedMaterials({
+      taskId: `book-${input.bookId}`,
+      cues: input.cues,
+      source,
+      videoAspect: input.aspect,
+      slotSeconds: FOOTAGE_CLIP_SECONDS,
+      clipSpeed: 1,
+      signal: input.signal,
+      note: input.note,
+    });
+
+    if (sceneClips) {
+      return await buildSegmentFootage({
+        clips: sceneClips,
+        audioFile: input.audioFile,
+        outputFile: input.outputFile,
+        aspect: input.aspect,
+        segmentIndex: input.segmentIndex,
+        threads: input.threads,
+        ordered: true,
+        signal: input.signal,
+      });
+    }
+
     const { terms, source: termSource } = await footageSearchTerms({
       bookTitle: input.bookTitle,
       author: input.bookAuthor,
@@ -960,6 +1000,9 @@ export async function runSegmentRender(
       chapterTitle: segment.title,
       segmentIndex: index,
       narrationText: text,
+      // In memory and already offset onto the joined timeline. Approximate when
+      // alignment failed (`longform.ts:298`), which is good enough for ordering.
+      cues: narration.cues,
       audioFile,
       outputFile: join(directory, "footage.mp4"),
       aspect: params.video_aspect as VideoAspectValue,

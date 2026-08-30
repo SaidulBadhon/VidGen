@@ -71,6 +71,15 @@ export interface Settings {
     proxy_fps: number;
     proxy_max_seconds: number;
   };
+  scene_footage: {
+    enabled: boolean;
+    shortlist_size: number;
+    judge_batch: number;
+    judge_model: string;
+    duration_ratio: number;
+    concurrency: number;
+    fallback_enabled: boolean;
+  };
   ui: Record<string, unknown>;
 }
 

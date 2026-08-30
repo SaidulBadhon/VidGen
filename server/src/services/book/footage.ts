@@ -250,6 +250,12 @@ export async function ensureBookFootagePool(options: {
  * The ordering is seeded from the segment index so two chapters of the same book
  * get visibly different montages while a retry of one chapter rebuilds the same
  * montage it had before.
+ *
+ * `ordered` is the exception, and the only one. A scene-matched list is already
+ * in the narration's order, one clip per scene; shuffling it would discard the
+ * whole point of having matched it. Everything else — the seeded PRNG, the clip
+ * length, the speed — is identical either way, so the two modes differ by one
+ * argument rather than by a second code path.
  */
 export async function buildSegmentFootage(options: {
   clips: string[];
@@ -258,6 +264,8 @@ export async function buildSegmentFootage(options: {
   aspect: VideoAspectValue;
   segmentIndex: number;
   threads?: number;
+  /** True when `clips` is scene-matched and its order must be preserved. */
+  ordered?: boolean;
   signal?: AbortSignal;
 }): Promise<string | null> {
   if (options.clips.length === 0) return null;
@@ -268,7 +276,7 @@ export async function buildSegmentFootage(options: {
       videoPaths: options.clips,
       audioFile: options.audioFile,
       videoAspect: options.aspect,
-      videoConcatMode: "random",
+      videoConcatMode: options.ordered ? "sequential" : "random",
       videoTransitionMode: null,
       maxClipDuration: FOOTAGE_CLIP_SECONDS,
       threads: options.threads ?? 2,

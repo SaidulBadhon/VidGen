@@ -256,6 +256,46 @@ export const footageIndexSettingsSchema = z.object({
   proxy_max_seconds: z.number().int().min(1).default(60),
 });
 
+export const sceneFootageSettingsSchema = z.object({
+  /**
+   * Master switch for scene-matched footage: narration is cut into scenes, the
+   * indexed gallery is searched per scene, and a judge picks the clip.
+   *
+   * Off by default. The flag gates a different material-selection path through
+   * both render orchestrators, so it stays opt-in until a deployment has an
+   * indexed library worth searching — with it off, selection is byte-identical
+   * to the term-based path.
+   */
+  enabled: z.boolean().default(false),
+  /** Candidates retrieved per scene before the judge sees them. */
+  shortlist_size: z.number().int().min(1).default(15),
+  /** Scenes per structured judge call. Larger batches trade latency for context. */
+  judge_batch: z.number().int().min(1).default(8),
+  /** Model that reads the shortlist descriptions and picks a clip, or `none`. */
+  judge_model: z.string().default("gemini-3.7-flash"),
+  /**
+   * Upper bound of the shortlist duration band, as a multiple of the scene's
+   * slot: `slot * speed <= duration <= slot * duration_ratio`.
+   *
+   * The judge reads a description of the *whole* clip while sequential
+   * rendering shows only the first `slot * speed` seconds, so an unbounded
+   * clip can be chosen for something that never reaches the screen. Bounding
+   * duration keeps judged and rendered footage approximately the same footage;
+   * raising it widens the candidate pool at the cost of that agreement.
+   *
+   * Fractions are meaningful — 2.5 is a legitimate band. Below 1 the band
+   * inverts and matches nothing, so 1 is the floor.
+   */
+  duration_ratio: z.number().min(1).default(4),
+  /** Judge batches in flight at once; each is one API call. */
+  concurrency: z.number().int().min(1).default(4),
+  /**
+   * Whether scenes the judge left at `none` fall through to a provider search.
+   * Off means such a scene simply contributes no clip.
+   */
+  fallback_enabled: z.boolean().default(true),
+});
+
 export const uiSettingsSchema = z.object({
   hide_log: z.boolean().default(false),
   open_task_folder_on_completion: z.boolean().default(true),
@@ -290,6 +330,7 @@ export const settingsSchema = z.object({
   kokoro: kokoroSettingsSchema.default({}),
   qdrant: qdrantSettingsSchema.default({}),
   footage_index: footageIndexSettingsSchema.default({}),
+  scene_footage: sceneFootageSettingsSchema.default({}),
   ui: uiSettingsSchema.default({}),
 });
 
@@ -303,6 +344,7 @@ export type ChatterboxSettings = z.infer<typeof chatterboxSettingsSchema>;
 export type KokoroSettings = z.infer<typeof kokoroSettingsSchema>;
 export type QdrantSettings = z.infer<typeof qdrantSettingsSchema>;
 export type FootageIndexSettings = z.infer<typeof footageIndexSettingsSchema>;
+export type SceneFootageSettings = z.infer<typeof sceneFootageSettingsSchema>;
 export type UiSettings = z.infer<typeof uiSettingsSchema>;
 export type Settings = z.infer<typeof settingsSchema>;
 
