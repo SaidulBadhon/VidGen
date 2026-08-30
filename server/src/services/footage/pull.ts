@@ -42,6 +42,7 @@ import { join } from "node:path";
 import { appConfig } from "../../config/settings.ts";
 import { footageRunsCollection, isConnected } from "../../db/client.ts";
 import type {
+  FootageCreator,
   FootageRunDocument,
   FootageRunStopReason,
   FootageRunTermResult,
@@ -61,8 +62,13 @@ import {
   providerFetch,
   safePublicUrl,
 } from "../material/http.ts";
-import { matchesVideoAspect } from "../material/search.ts";
+import { creatorInfo, matchesVideoAspect } from "../material/search.ts";
 import { isValidVideo } from "../video/probe.ts";
+// `provenance.ts` imports this module's search and filename helpers in return.
+// The cycle is safe and deliberate: every edge in both directions is a hoisted
+// function declaration, and neither module touches the other's bindings while
+// it is being evaluated.
+import { recordClipProvenance } from "./provenance.ts";
 import { allTerms } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -171,6 +177,13 @@ export interface PullCandidate {
   assetId: string;
   renditionId: string;
   sourcePage: string | null;
+  /**
+   * Whose work this is. Optional on the type so that a fixture built before
+   * provenance existed still satisfies it; absent and `null` mean the same
+   * thing to `recordClipProvenance`, which writes the field only when it has
+   * something to say.
+   */
+  creator?: FootageCreator | null;
   width: number;
   height: number;
   duration: number;
@@ -191,6 +204,14 @@ export interface PullResult {
   clipsFailed: number;
   /** Candidates already on disk. Counted toward coverage, never downloaded. */
   clipsSkippedExisting: number;
+  /**
+   * Provenance rows written for clips this run put on disk or found already
+   * there. Optional so the field can be added without invalidating a literal
+   * of this type written before provenance existed.
+   */
+  provenanceWritten?: number;
+  /** Provenance writes that failed. Never a failed download — see below. */
+  provenanceFailed?: number;
   /**
    * Every candidate the run selected, in selection order. On a dry run this is
    * the whole output: it is the list of what would be fetched.
@@ -408,21 +429,26 @@ export function parsePullArgs(argv: string[]): PullOptions {
 // Pexels search
 // ---------------------------------------------------------------------------
 
-interface PexelsVideoFile {
+export interface PexelsVideoFile {
   id?: number;
   width?: number;
   height?: number;
   link?: string;
 }
 
-interface PexelsVideo {
+export interface PexelsVideo {
   id?: number;
   duration?: number;
   url?: string;
+  /**
+   * The contributor. Untyped because it is untrusted provider JSON; every
+   * reader passes it through `creatorInfo`, which is the allow-list.
+   */
+  user?: unknown;
   video_files?: PexelsVideoFile[];
 }
 
-interface SearchPageResult {
+export interface SearchPageResult {
   /** The last HTTP status seen, including after retries. 0 means no response. */
   status: number;
   videos: PexelsVideo[];
@@ -454,8 +480,13 @@ function retryDelayMs(response: Response | undefined, attempt: number): number {
  * Pexels hourly allowance, so a sustained 429 is expected rather than
  * exceptional: after `MAX_ATTEMPTS` the status is returned and recorded as the
  * term's `last_status`, and the run moves on instead of dying.
+ *
+ * Exported because the provenance backfill has to re-issue *these* requests —
+ * same endpoint, same orientation, same construction of `page`, same backoff —
+ * to recover the URLs whose md5 named the files already on disk. A second
+ * paginating client would only have to be kept in step with this one.
  */
-async function searchPage(params: {
+export async function searchPexelsPage(params: {
   term: string;
   aspect: VideoAspectValue;
   page: number;
@@ -567,7 +598,7 @@ async function collectForTerm(params: {
   for (let page = 1; page <= pageCap && candidates.length < perTerm; page++) {
     if (signal?.aborted) break;
 
-    const { status, videos } = await searchPage({ term, aspect, page, perPage, signal });
+    const { status, videos } = await searchPexelsPage({ term, aspect, page, perPage, signal });
     if (status) result.last_status = status;
     if (videos.length === 0) break;
 
@@ -600,6 +631,10 @@ async function collectForTerm(params: {
         assetId: video.id === undefined ? "" : String(video.id),
         renditionId: file.id === undefined ? "" : String(file.id),
         sourcePage: safePublicUrl(video.url),
+        // Same allow-list the render path applies to the same field, so the
+        // two sources of a `footage_index` row cannot disagree about what a
+        // creator is.
+        creator: creatorInfo(video.user),
         width: Number(file.width) || 0,
         height: Number(file.height) || 0,
         duration: Math.trunc(Number(video.duration) || 0),
@@ -739,6 +774,59 @@ async function freeBytesOnStorage(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// Provenance
+// ---------------------------------------------------------------------------
+
+/**
+ * Records where one clip came from, and never fails the run for it.
+ *
+ * This is the whole reason the library had no attribution: `saveVideo` fires
+ * `noteDownloadedMaterial` and this module deliberately does not use
+ * `saveVideo`, so the hook never saw a single one of these downloads and
+ * `footage index` then rebuilt the rows from the filesystem — which knows a
+ * filename and nothing else. Everything the hook would have recorded is
+ * already in hand here, in `PullCandidate`; it was simply thrown away.
+ *
+ * Unlike the hook this one is awaited. The hook cannot block because it sits
+ * on the render path; the pull is off it by construction (see the module
+ * header), it has already spent a network round trip and tens of megabytes on
+ * this clip, and one more small write buys certainty that the provenance is
+ * durable before the process can be killed.
+ *
+ * What it keeps from the hook is the part that matters: **a provenance write
+ * is never allowed to cost a clip.** Every outcome is swallowed after a log
+ * line, so the caller's `try` around `downloadClip` can never see this throw
+ * and count a downloaded file as a failed download.
+ *
+ * Returns true when the row was written, which is only used for the run's
+ * counters.
+ */
+async function recordCandidateProvenance(candidate: PullCandidate): Promise<boolean> {
+  try {
+    if (!isConnected()) return false;
+    await recordClipProvenance({
+      localFile: candidate.localFile,
+      provider: "pexels",
+      assetId: candidate.assetId,
+      renditionId: candidate.renditionId,
+      sourcePage: candidate.sourcePage ?? "",
+      creator: candidate.creator ?? null,
+      searchTerm: candidate.term,
+    });
+    return true;
+  } catch (error) {
+    // The clip is on disk and the indexer walks the directory, so the cost of
+    // this is one clip with no attribution until the next pull or a
+    // `footage backfill-provenance` — never a lost download.
+    logger.warning(
+      `could not record provenance for ${candidate.localFile}: ` +
+        `${errorName(error)}, detail=${errorMessage(error)}`,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -789,6 +877,8 @@ export async function pullFootage(options: PullOptions = {}): Promise<PullResult
   let clipsAdded = 0;
   let clipsFailed = 0;
   let clipsSkippedExisting = 0;
+  let provenanceWritten = 0;
+  let provenanceFailed = 0;
   let stopReason: FootageRunStopReason = "complete";
 
   if (runId) {
@@ -850,12 +940,21 @@ export async function pullFootage(options: PullOptions = {}): Promise<PullResult
 
         if (dryRun) continue;
 
-        const fresh = found.filter((candidate) => {
-          if (!candidate.existing) return true;
+        const fresh: PullCandidate[] = [];
+        for (const candidate of found) {
+          if (!candidate.existing) {
+            fresh.push(candidate);
+            continue;
+          }
           clipsSkippedExisting++;
           logger.debug(`already cached, skipping: ${candidate.localFile}`);
-          return false;
-        });
+          // Recorded for the same reason the download hook records a cache
+          // hit: the file is already on disk, so its row is real, and on a
+          // warm cache these are the majority. Skipping them would leave most
+          // of the library with no attribution however often the pull re-runs.
+          if (await recordCandidateProvenance(candidate)) provenanceWritten++;
+          else provenanceFailed++;
+        }
 
         // Bounded parallelism over one term's clips: workers share a cursor and
         // each re-checks the stop conditions, so the budget is honoured by the
@@ -896,6 +995,10 @@ export async function pullFootage(options: PullOptions = {}): Promise<PullResult
               if (written > 0) {
                 bytesWritten += written;
                 clipsAdded++;
+                // After the rename, so a row is only ever written for a file
+                // that exists and decodes. Cannot throw — see the function.
+                if (await recordCandidateProvenance(candidate)) provenanceWritten++;
+                else provenanceFailed++;
                 logger.info(
                   `pulled ${candidate.localFile}: term=${JSON.stringify(candidate.term)}, ` +
                     `${candidate.width}x${candidate.height}, ${written} bytes`,
@@ -940,6 +1043,8 @@ export async function pullFootage(options: PullOptions = {}): Promise<PullResult
     clipsAdded,
     clipsFailed,
     clipsSkippedExisting,
+    provenanceWritten,
+    provenanceFailed,
     candidates,
   };
 
@@ -970,7 +1075,8 @@ export async function pullFootage(options: PullOptions = {}): Promise<PullResult
   logger.success(
     `footage pull ${dryRun ? "(dry run) " : ""}finished: stop_reason=${stopReason}, ` +
       `selected=${candidates.length}, added=${clipsAdded}, failed=${clipsFailed}, ` +
-      `already_cached=${clipsSkippedExisting}, bytes_written=${bytesWritten}`,
+      `already_cached=${clipsSkippedExisting}, bytes_written=${bytesWritten}, ` +
+      `provenance_written=${provenanceWritten}, provenance_failed=${provenanceFailed}`,
   );
 
   return result;

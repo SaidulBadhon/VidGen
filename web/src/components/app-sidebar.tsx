@@ -1,4 +1,4 @@
-import { BookOpen, Clapperboard, ListTodo, Settings } from "lucide-react";
+import { BookOpen, Clapperboard, Film, ListTodo, Settings } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/api/client.ts";
@@ -35,6 +35,7 @@ export function AppSidebar() {
     { title: t("Books"), url: "/books", icon: BookOpen },
   ];
   const workspaceItems = [
+    { title: t("Footage Gallery"), url: "/gallery", icon: Film },
     { title: t("Task Manager"), url: "/tasks", icon: ListTodo },
     { title: t("Settings"), url: "/settings", icon: Settings },
   ];

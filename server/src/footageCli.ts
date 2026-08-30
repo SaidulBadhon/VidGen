@@ -48,6 +48,11 @@ import {
   runCompare,
 } from "./services/footage/compare.ts";
 import { formatDryRun, parsePullArgs, pullFootage } from "./services/footage/pull.ts";
+import {
+  backfillProvenance,
+  formatBackfill,
+  parseBackfillArgs,
+} from "./services/footage/provenance.ts";
 import type { FootageIndexDocument, FootageRunDocument } from "./db/types.ts";
 import { errorMessage, logger, setLogLevel } from "./utils/logger.ts";
 import { APP_VERSION, PROJECT_NAME } from "./version.ts";
@@ -64,6 +69,7 @@ Commands
   reconcile                 Make Qdrant and the cache directory agree, then index the rest
   search QUERY              Semantic query against the index
   compare SUBJECT           Library vs provider keyword search, with a min_score sweep
+  backfill-provenance       Recover provider, asset, creator and terms for clips that have none
 
 status
   --json                    Machine-readable, instead of the operator report
@@ -92,6 +98,14 @@ index
   --json                    Machine-readable run result
 
 reconcile                   Accepts every \`index\` flag except --file
+
+backfill-provenance         Re-runs the pull's searches and matches vid-<md5(url)>.mp4 back to a row.
+  --dry-run                 Report how many rows would be filled; write nothing
+  --term TEXT               One search term (repeatable)
+  --terms A,B,C             Comma-separated search terms
+  --aspect NAME             portrait | landscape | square | both
+  --per-page N              Results per request (provider caps at 80)
+  --page-cap N              Provider pages per term/orientation
 
 search QUERY
   --limit N                 Results to return (default 10)
@@ -441,6 +455,37 @@ async function commandPull(argv: string[], waitMs: number): Promise<number> {
   return result.stopReason === "error" ? 1 : 0;
 }
 
+/**
+ * `backfill-provenance` — recovers the origin of clips that were pulled before
+ * the pull recorded one.
+ *
+ * Takes the index lock for the same reason `index` does: it decides what
+ * `state` a row is in, and an indexer running underneath it would be deciding
+ * the same thing from a copy of the row it read first.
+ */
+async function commandBackfillProvenance(argv: string[], waitMs: number): Promise<number> {
+  // `parseBackfillArgs` owns every flag and throws on an unknown one, so the
+  // names live in one place; its plain `Error`s are usage errors here.
+  let options;
+  try {
+    options = parseBackfillArgs(argv);
+  } catch (error) {
+    throw new UsageError(errorMessage(error));
+  }
+
+  const result = await withLock(
+    async (lock) => backfillProvenance({ ...options, signal: lock.signal }),
+    { label: "footage backfill-provenance", waitMs },
+  );
+
+  console.log(formatBackfill(result));
+  console.log();
+
+  // An unmatched clip is expected — its URL simply no longer surfaces — so the
+  // remainder is not a failure. A write that threw is.
+  return result.writeFailures > 0 ? 1 : 0;
+}
+
 async function commandIndex(argv: string[], waitMs: number): Promise<number> {
   const json = takeFlag(argv, "--json");
   const files = takeValues(argv, "--file");
@@ -687,6 +732,8 @@ async function main(): Promise<number> {
       return await commandSearch(rest);
     case "compare":
       return await commandCompare(rest);
+    case "backfill-provenance":
+      return await commandBackfillProvenance(rest, waitMs);
     default:
       console.error(`error: unknown command ${JSON.stringify(command)}\n`);
       console.error(HELP);

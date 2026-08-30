@@ -173,6 +173,95 @@ export interface YoutubeStatus {
   privacy_status: "public" | "unlisted" | "private";
 }
 
+// ---------------------------------------------------------------------------
+// Footage library
+// ---------------------------------------------------------------------------
+
+/** Who shot the clip, when the provider tells us. Absent on locally pulled clips. */
+export interface FootageCreator {
+  name?: string;
+  profile_page?: string;
+}
+
+/**
+ * One indexed stock clip, exactly as the Qdrant payload stores it.
+ *
+ * Everything except `score` is written at index time by the describe pass, so
+ * the fields are the vision model's vocabulary rather than a closed enum — see
+ * `server/src/services/footage/types.ts`. `summary` doubles as the title; there
+ * is no separate title field.
+ */
+export interface FootageItem {
+  local_file: string;
+  duration: number;
+  width: number;
+  height: number;
+  aspect: string;
+  bytes: number;
+  provider: string;
+  asset_id?: string;
+  source_page?: string;
+  creator?: FootageCreator;
+  search_terms: string[];
+  summary: string;
+  detailed_description: string;
+  use_cases: string[];
+  mood: string[];
+  tags: string[];
+  setting: string;
+  time_of_day: string;
+  camera_motion: string;
+  has_people: boolean;
+  has_on_screen_text: boolean;
+  quality_flags: string[];
+  indexed_at: string;
+  /** Relevance, present only when the request carried `q`. */
+  score?: number;
+}
+
+export interface FootageListResult {
+  total: number;
+  items: FootageItem[];
+}
+
+/**
+ * The `/footage/list` query.
+ *
+ * `q` switches the endpoint from a plain listing to a semantic search: items
+ * come back carrying `score` and ordered by relevance instead of by the
+ * library's own order.
+ *
+ * `sort` is a passthrough. The server owns its vocabulary and the UI does not
+ * invent one, so it only ever carries a value a caller put in the URL.
+ */
+export interface FootageListQuery {
+  limit?: number;
+  offset?: number;
+  aspect?: string;
+  provider?: string;
+  has_people?: boolean;
+  min_duration?: number;
+  q?: string;
+  sort?: string;
+}
+
+export interface FootageStats {
+  files: { count: number; bytes: number };
+  rows: { total: number; indexed: number; stale: number; failed: number; current: number };
+  qdrant: {
+    ok: boolean;
+    url: string;
+    collection: string;
+    alias: string;
+    version?: string;
+    detail?: string;
+    /** Null when Qdrant did not answer: unknown is not the same as empty. */
+    points: number | null;
+  };
+  drift: { orphan_points: number; missing_points: number } | null;
+  lock: { held: boolean; [key: string]: unknown } | null;
+}
+
 export interface ConnectionTestResult {
   success: boolean;
   message: string;
@@ -235,6 +324,29 @@ export const api = {
 
   listVoices: (server: string) =>
     request<{ server: string; voices: string[] }>(`/voices?server=${encodeURIComponent(server)}`),
+
+  /**
+   * One page of the footage library.
+   *
+   * Undefined and empty values are dropped rather than sent blank, so an
+   * unset filter is absent from the query string instead of arriving as
+   * `aspect=` — the two are not the same request.
+   */
+  listFootage: (query: FootageListQuery = {}) => {
+    const search = new URLSearchParams();
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null || value === "") continue;
+      search.set(key, String(value));
+    }
+    const suffix = search.toString();
+    return request<FootageListResult>(`/footage/list${suffix ? `?${suffix}` : ""}`);
+  },
+  footageStats: () => request<FootageStats>("/footage/stats"),
+
+  /** Poster frame for a clip. Served as image/jpeg. */
+  footageThumbUrl: (localFile: string) => `/api/v1/footage/thumb/${encodeURIComponent(localFile)}`,
+  /** The clip itself. Range-capable, so `<video controls>` can seek. */
+  footageClipUrl: (localFile: string) => `/api/v1/footage/clip/${encodeURIComponent(localFile)}`,
 
   /** Synthesises a short listen of the selected voice. Returns a playable blob. */
   previewVoice: async (
