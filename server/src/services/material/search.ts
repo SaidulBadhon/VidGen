@@ -102,6 +102,87 @@ export interface SearchParams {
 // Pexels
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Provider response handling
+//
+// Pixabay checked its status codes; Pexels and Coverr did not, and went
+// straight from `providerFetch` to `response.json()`. A 429 therefore produced
+// a body with no `videos`/`hits` key, logged "unsupported response" and
+// returned `[]` — indistinguishable from "this term genuinely has no footage".
+// A rate-limited render silently lost a term's clips with nothing in the log
+// naming the cause. A 1,000-clip pull hit that limit six times in ten minutes,
+// so it is a routine condition, not an edge case.
+// ---------------------------------------------------------------------------
+
+/** One retry only: render latency is bounded, and a sustained 429 will not clear. */
+export const PROVIDER_RETRY_ATTEMPTS = 2;
+const PROVIDER_RETRY_BASE_MS = 1_500;
+const PROVIDER_RETRY_MAX_MS = 3_000;
+
+/** `Retry-After` in seconds when the provider sends a usable one, else backoff. */
+export function providerRetryDelayMs(response: Response | undefined): number {
+  const header = Number(response?.headers.get("retry-after"));
+  if (Number.isFinite(header) && header > 0) {
+    return Math.min(header * 1000, PROVIDER_RETRY_MAX_MS);
+  }
+  return PROVIDER_RETRY_BASE_MS;
+}
+
+/**
+ * Fetches a provider search and parses JSON, or returns null having logged why.
+ *
+ * Null always means "no usable answer", and the caller returns `[]` — but the
+ * reason is now in the log. A 429 or 5xx is retried once; any other 4xx is a
+ * bad key or a bad query and will not improve by being asked again.
+ */
+export async function fetchProviderJson<T>(
+  provider: string,
+  url: string,
+  init: Parameters<typeof providerFetch>[1],
+  // Injected so the retry ladder is testable without a network, the way
+  // `downloadVideosByScriptOrder` injects `searchVideos`.
+  fetcher: typeof providerFetch = providerFetch,
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+): Promise<T | null> {
+  for (let attempt = 0; attempt < PROVIDER_RETRY_ATTEMPTS; attempt++) {
+    const response = await fetcher(url, init);
+    const status = response.status;
+    const contentType = response.headers.get("content-type") ?? "unknown";
+
+    if (response.ok) {
+      try {
+        return (await response.json()) as T;
+      } catch {
+        logger.error(
+          `${provider} returned an unexpected non-JSON response: status=${status}, content_type=${contentType}`,
+        );
+        return null;
+      }
+    }
+
+    const retryable = status === 429 || status >= 500;
+    if (!retryable) {
+      logger.error(`${provider} search request failed: status=${status}, content_type=${contentType}`);
+      return null;
+    }
+
+    if (attempt === PROVIDER_RETRY_ATTEMPTS - 1) {
+      logger.error(
+        `${provider} search gave up after ${PROVIDER_RETRY_ATTEMPTS} attempt(s): status=${status}` +
+          (status === 429 ? `, retry_after=${response.headers.get("retry-after") ?? "unknown"}` : ""),
+      );
+      return null;
+    }
+
+    const delay = providerRetryDelayMs(response);
+    logger.warning(
+      `${provider} search backing off ${delay}ms: status=${status}, attempt=${attempt + 1}/${PROVIDER_RETRY_ATTEMPTS}`,
+    );
+    await sleep(delay);
+  }
+  return null;
+}
+
 export async function searchVideosPexels(params: SearchParams): Promise<MaterialInfo[]> {
   const { searchTerm, minimumDuration, videoAspect, signal } = params;
   const [videoWidth, videoHeight] = aspectToResolution(videoAspect);
@@ -115,13 +196,7 @@ export async function searchVideosPexels(params: SearchParams): Promise<Material
   logger.info(`searching videos on pexels: term=${JSON.stringify(searchTerm)}`);
 
   try {
-    const response = await providerFetch(`https://api.pexels.com/v1/videos/search?${query}`, {
-      headers: { Authorization: apiKey, "User-Agent": BROWSER_USER_AGENT },
-      timeoutMs: 60_000,
-      signal,
-    });
-
-    const data = (await response.json()) as {
+    const data = await fetchProviderJson<{
       videos?: {
         id?: number;
         duration?: number;
@@ -129,7 +204,13 @@ export async function searchVideosPexels(params: SearchParams): Promise<Material
         user?: unknown;
         video_files?: { id?: number; width?: number; height?: number; link?: string }[];
       }[];
-    };
+    }>("pexels", `https://api.pexels.com/v1/videos/search?${query}`, {
+      headers: { Authorization: apiKey, "User-Agent": BROWSER_USER_AGENT },
+      timeoutMs: 60_000,
+      signal,
+    });
+
+    if (!data) return [];
 
     if (!data.videos) {
       logger.error("pexels video search returned an unsupported response");
@@ -306,14 +387,18 @@ export async function searchVideosCoverr(params: SearchParams): Promise<Material
   logger.info(`searching videos on coverr: term=${JSON.stringify(searchTerm)}`);
 
   try {
-    const response = await providerFetch(`https://api.coverr.co/videos?${query}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      timeoutMs: 60_000,
-      signal,
-    });
+    const data = await fetchProviderJson<{ hits?: Record<string, unknown>[] }>(
+      "coverr",
+      `https://api.coverr.co/videos?${query}`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        timeoutMs: 60_000,
+        signal,
+      },
+    );
 
-    const data = (await response.json()) as { hits?: Record<string, unknown>[] };
-    if (!data || !Array.isArray(data.hits)) {
+    if (!data) return [];
+    if (!Array.isArray(data.hits)) {
       logger.error("coverr video search returned an unsupported response");
       return [];
     }

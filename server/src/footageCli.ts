@@ -12,6 +12,7 @@
  *   bun run --cwd server footage pull --per-term 4
  *   bun run --cwd server footage index --concurrency 4
  *   bun run --cwd server footage search "empty hospital corridor"
+ *   bun run --cwd server footage compare "why cities feel lonely"
  *   bun run --cwd server footage reconcile
  */
 
@@ -38,6 +39,14 @@ import {
   withLock,
   type FootageLockStatus,
 } from "./services/footage/lock.ts";
+import {
+  DEFAULT_CLIP_DURATION,
+  DEFAULT_LIBRARY_LIMIT,
+  footageIndexEnabled,
+  formatReport,
+  parseAspect,
+  runCompare,
+} from "./services/footage/compare.ts";
 import { formatDryRun, parsePullArgs, pullFootage } from "./services/footage/pull.ts";
 import type { FootageIndexDocument, FootageRunDocument } from "./db/types.ts";
 import { errorMessage, logger, setLogLevel } from "./utils/logger.ts";
@@ -54,6 +63,7 @@ Commands
   index                     Describe, embed and index every clip on disk
   reconcile                 Make Qdrant and the cache directory agree, then index the rest
   search QUERY              Semantic query against the index
+  compare SUBJECT           Library vs provider keyword search, with a min_score sweep
 
 status
   --json                    Machine-readable, instead of the operator report
@@ -87,6 +97,19 @@ search QUERY
   --limit N                 Results to return (default 10)
   --aspect NAME             Restrict to portrait | landscape | square
   --json                    Machine-readable matches
+
+compare SUBJECT             Read-only. Downloads nothing, writes nothing, renders nothing.
+  --script TEXT             Narration passed to the term generator (default empty)
+  --terms A,B,C             Use these terms and skip the LLM entirely
+  --amount N                Terms to generate (default 5, or 8 with --match-script-order)
+  --match-script-order      Mirror the pipeline flag: 8 terms, order preserved
+  --source NAME             Provider for the keyword side: pexels | pixabay | coverr
+  --no-provider             Skip the provider side; spends no quota
+  --aspect ASPECT           16:9 | 9:16 | 1:1 (orientation words also accepted; default 9:16)
+  --clip-duration N         Per-clip cap, and the minimum duration both sides filter on (default ${DEFAULT_CLIP_DURATION})
+  --limit N                 Library matches per term (default ${DEFAULT_LIBRARY_LIMIT}, max 100)
+  --audio-duration N        Narration length the sweep reports coverage against
+  --json                    Machine-readable report
 
 Global
   --wait MS                 Wait this long for the index lock instead of failing (default 0)
@@ -175,6 +198,16 @@ function takeIndexOptions(argv: string[]): IndexAllOptions {
   if (takeFlag(argv, "--redescribe")) options.redescribe = true;
   if (takeFlag(argv, "--retry-failed")) options.retryFailed = true;
   return options;
+}
+
+/** Like `positiveInt`, but for the flags that are genuinely fractional (seconds). */
+function positiveNumber(raw: string | undefined, flag: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new UsageError(`${flag} needs a positive number`);
+  }
+  return parsed;
 }
 
 function rejectLeftovers(argv: string[]): void {
@@ -517,6 +550,80 @@ async function commandSearch(argv: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `compare` — does the library pick better clips than a provider keyword search?
+ *
+ * Read-only for the same reason `search` is, and then some: it exists to answer
+ * a question about the render path *without* touching it, so it takes no lock,
+ * downloads nothing, and writes nothing anywhere. The only side effect it can
+ * have is a provider search populating the shared 24-hour material cache — the
+ * same entry a render would have written — which `--no-provider` avoids
+ * entirely.
+ */
+async function commandCompare(argv: string[]): Promise<number> {
+  const json = takeFlag(argv, "--json");
+  const noProvider = takeFlag(argv, "--no-provider");
+  const matchScriptOrder = takeFlag(argv, "--match-script-order");
+  const script = takeValue(argv, "--script");
+  const termsRaw = takeValue(argv, "--terms");
+  const amount = positiveInt(takeValue(argv, "--amount"), "--amount");
+  const source = takeValue(argv, "--source");
+  const aspectRaw = takeValue(argv, "--aspect");
+  const clipDuration = positiveNumber(takeValue(argv, "--clip-duration"), "--clip-duration");
+  const limit = positiveInt(takeValue(argv, "--limit"), "--limit");
+  const audioDuration = positiveNumber(takeValue(argv, "--audio-duration"), "--audio-duration");
+
+  const subject = argv.filter((arg) => !arg.startsWith("--")).join(" ").trim();
+  rejectLeftovers(argv.filter((arg) => arg.startsWith("--")));
+
+  if (!subject) {
+    console.error("error: compare needs a video subject\n");
+    return 2;
+  }
+
+  let videoAspect;
+  try {
+    videoAspect = aspectRaw ? parseAspect(aspectRaw) : undefined;
+  } catch (error) {
+    throw new UsageError(errorMessage(error));
+  }
+
+  const terms = termsRaw
+    ? termsRaw.split(",").map((term) => term.trim()).filter(Boolean)
+    : undefined;
+  if (termsRaw && (!terms || terms.length === 0)) throw new UsageError("--terms needs at least one term");
+
+  // Advisory only: the points already in Qdrant are searchable whether or not
+  // indexing is switched on, but "empty library" and "indexing disabled" are
+  // different findings and the reader should not have to guess which one this is.
+  if (!footageIndexEnabled()) {
+    logger.warning("footage_index.enabled is false; the library is still searched, but nothing is adding to it");
+  }
+
+  const report = await runCompare({
+    videoSubject: subject,
+    videoScript: script ?? "",
+    ...(terms ? { terms } : {}),
+    ...(amount !== undefined ? { amount } : {}),
+    matchScriptOrder,
+    ...(source ? { source } : {}),
+    ...(videoAspect ? { videoAspect } : {}),
+    ...(clipDuration !== undefined ? { maxClipDuration: clipDuration } : {}),
+    ...(limit !== undefined ? { libraryLimit: limit } : {}),
+    ...(audioDuration !== undefined ? { audioDuration } : {}),
+    useProvider: !noProvider,
+  });
+
+  if (json) console.log(JSON.stringify(report, null, 2));
+  else console.log(formatReport(report));
+
+  // A comparison that ran is a success even when the library turns out to have
+  // nothing: "the library cannot serve these terms" is the measurement, not a
+  // failure of the command. Only an unreachable Qdrant leaves the question
+  // genuinely unanswered.
+  return report.qdrant_available ? 0 : 1;
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -578,6 +685,8 @@ async function main(): Promise<number> {
       return await commandReconcile(rest, waitMs);
     case "search":
       return await commandSearch(rest);
+    case "compare":
+      return await commandCompare(rest);
     default:
       console.error(`error: unknown command ${JSON.stringify(command)}\n`);
       console.error(HELP);
