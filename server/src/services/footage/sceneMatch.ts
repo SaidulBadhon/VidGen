@@ -166,52 +166,67 @@ export function buildScenes(cues: readonly SceneCue[], slotSeconds: number): Sce
   const slot = Number.isFinite(slotSeconds) && slotSeconds > 0 ? slotSeconds : DEFAULT_SLOT_SECONDS;
   if (!Array.isArray(cues) || cues.length === 0) return [];
 
-  const scenes: Scene[] = [];
-  let words: string[] = [];
-  let start = 0;
-  let end = 0;
-  let open = false;
-
-  const flush = () => {
-    if (!open) return;
-    scenes.push({
-      id: `scene-${scenes.length + 1}`,
-      index: scenes.length,
-      text: words.join(" ").replace(/\s+/g, " ").trim(),
-      start,
-      end,
-    });
-    words = [];
-    open = false;
-  };
-
+  // 1. Normalize the cues onto a monotonic timeline.
+  //
+  // Cue timings arrive from TTS adapters and from approximate long-form
+  // alignment (`longform.ts:298`), so they are coerced rather than trusted. A
+  // cue with no usable start continues from where the last one stopped, which
+  // keeps the timeline monotonic instead of resetting it to zero.
+  const spans: { start: number; end: number; text: string }[] = [];
+  let cursor = 0;
   for (const cue of cues) {
     if (!cue) continue;
-
-    // Cue timings arrive from TTS adapters and from approximate long-form
-    // alignment (`longform.ts:298`), so they are coerced rather than trusted.
-    // A cue that carries no usable start continues from where the last one
-    // stopped, which keeps the span monotonic instead of resetting it to zero.
     const rawStart = Number(cue.start);
     const rawEnd = Number(cue.end);
-    const cueStart = Number.isFinite(rawStart) ? rawStart : open ? end : 0;
+    const cueStart = Number.isFinite(rawStart) ? rawStart : cursor;
     const cueEnd = Number.isFinite(rawEnd) ? Math.max(rawEnd, cueStart) : cueStart;
+    spans.push({ start: cueStart, end: cueEnd, text: String(cue.text ?? cue.content ?? "").trim() });
+    cursor = Math.max(cursor, cueEnd);
+  }
+  if (spans.length === 0) return [];
 
-    if (!open) {
-      start = cueStart;
-      end = cueEnd;
-      open = true;
-    } else {
-      end = Math.max(end, cueEnd);
-    }
+  const first = Math.min(...spans.map((s) => s.start));
+  const last = Math.max(...spans.map((s) => s.end));
+  const total = Math.max(last - first, 0);
 
-    const text = String(cue.text ?? cue.content ?? "").trim();
-    if (text) words.push(text);
+  // 2. Tile the timeline into fixed slot-length windows.
+  //
+  // This is a tiling, not a grouping, and the difference is the whole point.
+  // Grouping cues until a span *reaches* the slot makes every scene at least
+  // one slot long — routinely longer with phrase-level cues (measured on a
+  // book segment: 3.5-7.4s spans against a 5s slot). The renderer then caps
+  // every assigned clip at exactly one slot, so N scenes yield `N * slot` of
+  // picture against `sum(spans)` of narration. A verified book render produced
+  // 30s of picture for 39s of narration and `combineVideos` filled the gap by
+  // looping from the start (`combine.ts:257`) — the closing narration played
+  // over the opening scene's footage, the exact failure this feature exists to
+  // prevent. Splitting long groups instead overshoots, and the combiner drops
+  // whatever it no longer needs (`combine.ts:216`), stranding the tail scenes.
+  //
+  // A tile is exactly one slot, so picture and narration stay in step by
+  // construction: `ceil(total / slot)` scenes, overshooting by less than one
+  // slot on the final tile and never undershooting.
+  const count = Math.max(1, Math.ceil((total - 1e-9) / slot));
+  const scenes: Scene[] = [];
 
-    if (end - start >= slot) flush();
+  for (let index = 0; index < count; index++) {
+    const start = first + index * slot;
+    const end = index === count - 1 ? Math.max(last, start) : start + slot;
+
+    // A tile's text is every cue overlapping it. A cue straddling a boundary
+    // belongs to both tiles it touches: it is genuinely being spoken over
+    // both, and half a sentence matches nothing well.
+    const text = spans
+      .filter((span) => span.end > start && span.start < end)
+      .map((span) => span.text)
+      .filter(Boolean)
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    scenes.push({ id: `scene-${index + 1}`, index, text, start, end });
   }
 
-  flush();
   return scenes;
 }
 
@@ -631,7 +646,16 @@ export function validateJudgeResponse(
       return { scene_id: scene.id, choice: null, reason: "judge answered this scene more than once" };
     }
 
-    const raw = typeof answer.choice === "number" ? answer.choice : Number(answer.choice);
+    // `Number(null)` and `Number("")` are both 0, which would resolve to
+    // candidate 0 — the judge picking the first clip without having said so,
+    // which is the exact "wrong clip" outcome `none` exists to avoid. Only a
+    // real number, or a string that actually contains one, counts.
+    const raw =
+      typeof answer.choice === "number"
+        ? answer.choice
+        : typeof answer.choice === "string" && answer.choice.trim() !== ""
+          ? Number(answer.choice)
+          : NaN;
     const choice = Number.isInteger(raw) ? raw : NaN;
 
     // A deliberate refusal and a malformed answer both become `none`, but they
