@@ -6,7 +6,8 @@
  * ported from python-version/app/controllers/v1/video.py.
  */
 
-import { existsSync, statSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readSync, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { extname, join } from "node:path";
 import type { Context } from "hono";
 import { resolvePathWithinDirectory, UnsafePathError } from "../utils/fileSecurity.ts";
@@ -83,7 +84,13 @@ export function parseByteRange(rangeHeader: string | null, fileSize: number): By
 }
 
 /** Serves a file with Range support, streaming rather than buffering. */
-export function serveFileWithRange(c: Context, filePath: string, forceDownload = false): Response {
+export function serveFileWithRange(
+  c: Context,
+  filePath: string,
+  forceDownload = false,
+  /** Sent verbatim when given. Callers serving immutable content set it. */
+  cacheControl?: string,
+): Response {
   const size = statSync(filePath).size;
   const range = parseByteRange(c.req.header("Range") ?? null, size);
 
@@ -104,13 +111,80 @@ export function serveFileWithRange(c: Context, filePath: string, forceDownload =
     "Accept-Ranges": "bytes",
   };
   if (isPartial) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
+  if (cacheControl) headers["Cache-Control"] = cacheControl;
   if (forceDownload) {
     headers["Content-Disposition"] = `attachment; filename="${encodeURIComponent(filePath.split("/").pop() ?? "download")}"`;
   }
 
-  // Bun streams a sliced BunFile without reading the whole file into memory.
-  const body = Bun.file(filePath).slice(start, end + 1);
-  return new Response(body, { status: isPartial ? 206 : 200, headers });
+  return new Response(rangeBody(filePath, start, end), {
+    status: isPartial ? 206 : 200,
+    headers,
+  });
+}
+
+/**
+ * Largest range read into memory rather than streamed. Four mebibytes covers
+ * the windows a video element actually asks for while seeking; a handful of
+ * concurrent viewers at that size is megabytes resident, not gigabytes.
+ */
+const MAX_BUFFERED_RANGE = 4 * 1024 * 1024;
+
+/**
+ * A body for `[start, end]` that survives being re-wrapped.
+ *
+ * The obvious form — `Bun.file(path).slice(start, end + 1)` — is correct in
+ * isolation and correct on `/tasks/*`, but silently wrong under `/api/*`, and
+ * the reason is invisible from either side:
+ *
+ *   Hono's `Context`'s `res` setter re-wraps an assigned response as
+ *   `new Response(_res.body, _res)` (hono 4.13.1, `dist/context.js`) once
+ *   anything has touched `c.res` — which the CORS middleware mounted on
+ *   `/api/*` does. Re-wrapping reads `.body`, and Bun's conversion of a
+ *   *sliced* `BunFile` to a stream keeps the slice's start offset but loses
+ *   its end, so the body runs to end-of-file.
+ *
+ * Measured before this fix, `Range: bytes=0-1023` on a 23,139,933-byte task
+ * video through `/api/v1/stream/*`: status 206, `Content-Range: bytes
+ * 0-1023/23139933`, and 23,139,933 bytes of body. Correct headers, whole file.
+ * A player seeking on that receives bytes that do not match the range it was
+ * promised, and nothing reports an error. `/tasks/*` escaped it only by being
+ * registered on the root app, with no `/api/*` middleware to touch `c.res`.
+ *
+ * Two forms survive re-wrapping. Bytes, for a range small enough to hold:
+ * re-wrapping preserves it exactly and `Content-Length` stays accurate, which
+ * is what players handle best. A node read stream over `{ start, end }` for
+ * anything larger, including a whole file: correct at any size and never
+ * resident, at the cost of Bun serving it chunked, so the client learns the
+ * total from `Content-Range` instead.
+ *
+ * The read is positional and synchronous so this function keeps its signature.
+ * Making it async would push `await` through `serveTaskFile`, the two video
+ * routes, the book cover route and the BGM preview — a far wider change than
+ * the bug warrants. `Bun.file(p).slice(a, b).stream()` is not an option: it
+ * hangs.
+ */
+function rangeBody(filePath: string, start: number, end: number): Uint8Array | ReadableStream<Uint8Array> {
+  const length = end - start + 1;
+
+  if (length > MAX_BUFFERED_RANGE) {
+    return Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>;
+  }
+
+  const buffer = new Uint8Array(length);
+  const fd = openSync(filePath, "r");
+  try {
+    // One positional read cannot be assumed to return everything it was asked
+    // for, so fill until the range is covered or the file ends short.
+    let filled = 0;
+    while (filled < length) {
+      const read = readSync(fd, buffer, filled, length - filled, start + filled);
+      if (read <= 0) break;
+      filled += read;
+    }
+    return filled === length ? buffer : buffer.subarray(0, filled);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

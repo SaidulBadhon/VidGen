@@ -7,8 +7,6 @@
  * unauthenticated POST.
  */
 
-import { createReadStream, statSync } from "node:fs";
-import { Readable } from "node:stream";
 
 import { Hono } from "hono";
 import type { Context } from "hono";
@@ -18,7 +16,7 @@ import type { Filter } from "mongodb";
 import { footageIndexCollection } from "../../db/client.ts";
 import type { FootageIndexDocument } from "../../db/types.ts";
 import { badRequest, HttpException, notFound } from "../../http/errors.ts";
-import { parseByteRange } from "../../http/staticFiles.ts";
+import { serveFileWithRange } from "../../http/staticFiles.ts";
 import { isCacheClipName, searchFootage, stats } from "../../services/footage/index.ts";
 import type { FootageFilter, FootagePayload } from "../../services/footage/qdrant.ts";
 import { ensureThumb } from "../../services/footage/thumbs.ts";
@@ -484,91 +482,7 @@ footageRouter.get("/footage/thumb/:localFile", async (c) => {
   });
 });
 
-/**
- * How large a byte range may be before it is streamed instead of buffered.
- *
- * See `serveClipRange` for why the choice exists at all. Four mebibytes covers
- * the windows a video element actually asks for while seeking, and a handful of
- * concurrent viewers at that size is megabytes of resident memory, not
- * gigabytes.
- */
-const MAX_BUFFERED_RANGE = 4 * 1024 * 1024;
-
-/**
- * The clip itself, with byte ranges — and the one place this router cannot use
- * `serveFileWithRange`.
- *
- * That helper builds its body as `Bun.file(path).slice(start, end + 1)`, which
- * is correct in isolation and correct on `/tasks/*`. It is **not** correct
- * under `/api/*`, and the reason is worth writing down because nothing about it
- * is visible from either side:
- *
- *   Hono's `Context`'s `res` setter re-wraps an assigned response —
- *   `new Response(_res.body, _res)` (hono 4.13.1, `dist/context.js`) — once
- *   anything has already touched `c.res`, which the CORS middleware mounted on
- *   `/api/*` does. Re-wrapping reads `.body` off the response, and Bun's
- *   conversion of a *sliced* `BunFile` to a stream keeps the slice's start
- *   offset but loses its end: the body then runs to end-of-file.
- *
- * Measured on this build, `Range: bytes=0-1023` against a 4,145,441-byte clip:
- * status 206 and `Content-Range: bytes 0-1023/4145441`, with 4,145,441 bytes of
- * body. Correct headers, whole file. A player seeking on that gets bytes that
- * do not match the range it was promised, and nothing anywhere reports an
- * error. (The same bug is live on `/api/v1/stream/*`, which is not this
- * router's to fix.)
- *
- * So the range arithmetic is reused — `parseByteRange` is exported, tested, and
- * owns the 416 and suffix-range cases — and only the body is built differently,
- * as one of two forms that survive being re-wrapped:
- *
- *  - **Bytes**, for a range small enough to hold. Re-wrapping preserves it
- *    exactly, `Content-Length` survives, and a 206 with a real length is what
- *    every player handles best.
- *  - **A node read stream** over `{ start, end }`, for anything larger,
- *    including a whole clip. Correct at any size and never resident; the cost
- *    is that Bun serves a stream chunked, so `Content-Length` is dropped and
- *    the client learns the total from `Content-Range` instead.
- */
-async function serveClipRange(c: Context, filePath: string): Promise<Response> {
-  const size = statSync(filePath).size;
-  const rangeHeader = c.req.header("Range") ?? null;
-  const range = parseByteRange(rangeHeader, size);
-
-  if (range === "unsatisfiable") {
-    return new Response(null, {
-      status: 416,
-      headers: { "Content-Range": `bytes */${size}`, "Accept-Ranges": "bytes" },
-    });
-  }
-
-  const { start, end } = range;
-  const length = end - start + 1;
-  const isPartial = rangeHeader != null;
-
-  const headers: Record<string, string> = {
-    // `isCacheClipName` admits only `.mp4`, so the type is not a lookup.
-    "Content-Type": "video/mp4",
-    "Content-Length": String(length),
-    "Accept-Ranges": "bytes",
-    "Cache-Control": IMMUTABLE_CACHE,
-  };
-  if (isPartial) headers["Content-Range"] = `bytes ${start}-${end}/${size}`;
-
-  const body =
-    length <= MAX_BUFFERED_RANGE
-      ? new Uint8Array(await Bun.file(filePath).slice(start, end + 1).arrayBuffer())
-      : (Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>);
-
-  return new Response(body, { status: isPartial ? 206 : 200, headers });
-}
-
-/**
- * The clip itself.
- *
- * Range support is the whole point: without it a browser must download an
- * entire clip before it can show a second of it, and cannot seek at all.
- */
-footageRouter.get("/footage/clip/:localFile", async (c) => {
+footageRouter.get("/footage/clip/:localFile", (c) => {
   const name = c.req.param("localFile");
 
   let clip: string;
@@ -578,5 +492,5 @@ footageRouter.get("/footage/clip/:localFile", async (c) => {
     throw clipPathError(name, error);
   }
 
-  return serveClipRange(c, clip);
+  return serveFileWithRange(c, clip, false, IMMUTABLE_CACHE);
 });
