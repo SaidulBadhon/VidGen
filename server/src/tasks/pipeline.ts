@@ -4,7 +4,7 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { appConfig, resolveContentLanguage, resolveVoiceName } from "../config/settings.ts";
 import {
   CROSS_POST_STATE_FAILED,
@@ -31,13 +31,20 @@ import * as sonilo from "../services/music/sonilo.ts";
 import * as elevenlabsMusic from "../services/music/elevenlabsMusic.ts";
 import { getBgmFile, shouldUseBgm } from "../services/bgm.ts";
 import { generateSubtitle } from "../services/subtitle/index.ts";
-import { matchScenes, sceneFootageOptions, isCancellation, type SceneCue } from "../services/footage/sceneMatch.ts";
+import {
+  matchScenes,
+  sceneFootageOptions,
+  isCancellation,
+  type Assignment,
+  type SceneCue,
+} from "../services/footage/sceneMatch.ts";
 import { resolveSceneFallback } from "../services/footage/sceneFallback.ts";
+import { footageIndexCollection } from "../db/client.ts";
 import { downloadVideos } from "../services/material/download.ts";
 import { preprocessVideos } from "../services/video/preprocess.ts";
 import { combineVideos } from "../services/video/combine.ts";
 import { generateVideo } from "../services/video/generate.ts";
-import { writeScriptData } from "../services/taskArtifacts.ts";
+import { patchScriptData, writeScriptData } from "../services/taskArtifacts.ts";
 import { BOOK_SHORT_REQUEST_PREFIX } from "../services/book/shorts.ts";
 import { scheduleCrossPost } from "./crossPost.ts";
 import { scheduleAutoYoutubeUpload } from "./youtubeUpload.ts";
@@ -305,7 +312,87 @@ export async function resolveSceneMatchedMaterials(
     );
   }
 
+  if (options.taskId) await persistSceneMaterialSources(options.taskId, ordered, match);
+
   return ordered;
+}
+
+/**
+ * Records which clips a scene-matched render used, and who made them.
+ *
+ * `downloadVideos` writes `material_sources` on its way past, but scene
+ * matching does not go through it, so a scene-matched render produced a task
+ * artifact with no provenance at all — the clips are attributed in the gallery,
+ * but nothing said which ones this video used. These are Pexels clips under
+ * Pexels terms, so per-task attribution is not decoration.
+ *
+ * The gallery's own row is the source rather than the Qdrant payload: it is
+ * authoritative, already carries provider/asset/creator/source_page, and one
+ * indexed query beats a vector round-trip. Fields are copied through an
+ * allow-list and the record is shaped like `materialSourceRecord`'s output, so
+ * anything already reading `material_sources` sees the same keys — plus
+ * `selection: "scene"`, the scene it served and the judge's reason, which is
+ * the part a person actually wants when asking why a clip is in their video.
+ *
+ * Best-effort throughout: provenance must never fail a render that has already
+ * produced its picture.
+ */
+async function persistSceneMaterialSources(
+  taskId: string,
+  ordered: readonly string[],
+  match: { scenes: readonly { id: string }[]; assignments: readonly Assignment[] },
+): Promise<void> {
+  try {
+    const names = ordered.map((file) => basename(file));
+    if (names.length === 0) return;
+
+    const rows = await footageIndexCollection()
+      .find({ local_file: { $in: names } })
+      .toArray();
+    const byName = new Map(rows.map((row) => [row.local_file, row]));
+    const bySceneFile = new Map(
+      match.assignments.filter((a) => a.local_file).map((a) => [a.local_file as string, a]),
+    );
+
+    const sources = names.map((name) => {
+      const row = byName.get(name);
+      const assignment = bySceneFile.get(name);
+      const record: Record<string, unknown> = {
+        provider: String(row?.provider ?? ""),
+        local_file: name,
+        // `selection` is what tells a reader this clip was chosen by meaning
+        // rather than returned by a keyword search.
+        selection: "scene",
+      };
+      if (typeof row?.duration === "number") record.duration = Math.trunc(row.duration);
+      if (row?.asset_id) record.asset_id = String(row.asset_id);
+      if (row?.rendition_id) record.rendition_id = String(row.rendition_id);
+      if (row?.source_page) record.source_page = String(row.source_page);
+      if (row?.creator) record.creator = row.creator;
+      // The library keeps every term a clip has ever answered; only the one
+      // that selected it here is meaningful to this task.
+      if (assignment) {
+        record.scene_id = assignment.scene_id;
+        record.reason = assignment.reason;
+        if (assignment.substituted) record.substituted = true;
+      } else {
+        record.scene_id = null;
+      }
+      return record;
+    });
+
+    const saved = await patchScriptData(taskId, { material_sources: sources });
+    if (saved) {
+      const attributed = sources.filter((source) => source.provider).length;
+      logger.info(
+        `saved scene-matched material sources: task_id=${taskId}, count=${sources.length}, attributed=${attributed}`,
+      );
+    }
+  } catch (error) {
+    logger.warning(
+      `failed to persist scene-matched material sources: task_id=${taskId}, ${errorMessage(error)}`,
+    );
+  }
 }
 
 export interface RunPipelineOptions {
