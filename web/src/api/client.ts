@@ -67,6 +67,12 @@ export interface Settings {
     describe_model: string;
     embed_model: string;
     concurrency: number;
+    /**
+     * Minutes between the server's own index passes; `0` turns the loop off.
+     * Fractional values are valid, and the server holds anything above zero to
+     * a one-second floor.
+     */
+    index_interval_minutes: number;
     proxy_height: number;
     proxy_fps: number;
     proxy_max_seconds: number;

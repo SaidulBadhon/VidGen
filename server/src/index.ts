@@ -24,6 +24,7 @@ import { pingRouter } from "./routes/v1/ping.ts";
 import { settingsRouter } from "./routes/v1/settings.ts";
 import { videoRouter } from "./routes/v1/video.ts";
 import { youtubeRouter } from "./routes/v1/youtube.ts";
+import { startFootageIndexScheduler, stopFootageIndexScheduler } from "./services/footage/scheduler.ts";
 import { logger } from "./utils/logger.ts";
 import { getResponse } from "./utils/misc.ts";
 import { APP_VERSION, PROJECT_NAME } from "./version.ts";
@@ -98,6 +99,16 @@ async function bootstrap(): Promise<void> {
   // confusing failure inside the task modules.
   const { recoverInterruptedTasks } = await import("./tasks/recovery.ts");
   await recoverInterruptedTasks();
+
+  // The periodic footage index pass. Last, and deliberately not awaited beyond
+  // arming its timer: the call only schedules, so nothing here delays
+  // `Bun.serve`, and the first pass is a full interval away rather than
+  // competing with the recovery sweep above for Mongo.
+  //
+  // It lives in the server because it cannot live outside it — macOS TCC
+  // refuses a cron job and a launchd agent access to `~/Documents`, so both
+  // died at exit 126 before ever reaching bun.
+  startFootageIndexScheduler();
 }
 
 await bootstrap();
@@ -115,6 +126,9 @@ logger.success(`${PROJECT_NAME} v${APP_VERSION} listening on http://${LISTEN_HOS
 async function shutdown(signal: string): Promise<void> {
   logger.info(`received ${signal}, shutting down`);
   await server.stop(true);
+  // Before `disconnect()`, always: a tick that fires after the client closes
+  // would try to take a Mongo lock it could then never release.
+  stopFootageIndexScheduler();
   await disconnect();
   process.exit(0);
 }

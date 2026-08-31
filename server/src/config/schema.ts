@@ -244,6 +244,28 @@ export const footageIndexSettingsSchema = z.object({
   concurrency: z.number().int().min(1).default(4),
 
   /**
+   * How often the server runs an index pass over the cache directory, in
+   * minutes. `0` disables the loop entirely.
+   *
+   * The download hook records where a clip came from but never describes it,
+   * so until a pass runs a fallback clip is on disk, has a provenance row, and
+   * is **not searchable**. Something has to close that gap periodically, and
+   * on macOS it cannot be cron or launchd: TCC denies a background job access
+   * to `~/Documents`, where this repo lives, so both exited 126 before reaching
+   * bun. The server process already runs as the user with full repo access,
+   * which is why the loop lives inside it (`services/footage/scheduler.ts`).
+   *
+   * Fractional values are valid — `0.5` is thirty seconds — because that is
+   * the only way to exercise the loop without waiting a minute per tick. The
+   * scheduler clamps the computed period to a one-second floor so a mistyped
+   * `0.0001` cannot turn into a busy loop.
+   *
+   * Re-running the pass on an already-indexed cache is free: every file
+   * resolves to a skip, with no describe call and no write.
+   */
+  index_interval_minutes: z.number().min(0).default(60),
+
+  /**
    * What gets described is a downscaled proxy, never the original file. These
    * values reduce a 200 MB clip to a couple of megabytes, which keeps every
    * request inline — no upload API, no branching on file size — while still
